@@ -33,9 +33,9 @@ export class SessionManagerClass {
   private modelRegistry: any;
   private thinkerSession: SessionHandle | null = null;
   private doerSession: SessionHandle | null = null;
-  private tokenStats = {
-    thinker: this.emptyTokenStats(),
-    doer: this.emptyTokenStats(),
+  private tokenStats: { thinker: TokenStats; doer: TokenStats } = {
+    thinker: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 },
+    doer: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 },
   };
 
   constructor() {
