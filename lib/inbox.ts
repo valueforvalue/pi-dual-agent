@@ -54,9 +54,25 @@ export class InboxManager {
 
   async writePlan(plan: Plan): Promise<void> {
     await this.ensureExists();
-    
+
     const content = this.serializePlan(plan);
     await writeFile(join(this.inboxPath(), FILES.PLAN), content, "utf-8");
+  }
+
+  /**
+   * Write raw content to an arbitrary path inside the inbox. Used by
+   * the checkpoint flow when the user edits plan.md directly in the
+   * editor - we want to save the user's literal text, not re-serialize
+   * a Plan struct (which would normalize away their formatting).
+   */
+  async writeFileRaw(absolutePath: string, content: string): Promise<void> {
+    // Validate that the path is inside the inbox directory so this
+    // method cannot be repurposed to write outside the project.
+    const inboxAbs = this.inboxPath();
+    if (!absolutePath.startsWith(inboxAbs)) {
+      throw new Error(`writeFileRaw: path must be inside ${inboxAbs}`);
+    }
+    await writeFile(absolutePath, content, "utf-8");
   }
 
   async readPlan(): Promise<Plan | null> {

@@ -74,7 +74,7 @@ function getPhaseIcon(phase: string): string {
   const icons: Record<string, string> = {
     idle: "○",
     thinking: "🤔",
-    checkpoint: "👤",
+    checkpoint: "⏸",
     doing: "⚡",
     reviewing: "🔍",
     done: "✓",
@@ -83,9 +83,23 @@ function getPhaseIcon(phase: string): string {
 }
 
 function updateStatusBar(ctx: ExtensionContext): void {
+  // Persistent checkpoint status - visible until the user resolves the
+  // checkpoint, not just a transient notification.
+  if (state.phase === "checkpoint") {
+    const status = `⏸ CHECKPOINT — review .pi/inbox/plan.md (Approve/Edit/Stop)`;
+    ctx.ui.setStatus("pi-dual-agent", ctx.ui.theme.fg("warning", status));
+    return;
+  }
   const icon = getPhaseIcon(state.phase);
   const status = `${icon} Dual:${state.mode} iter:${state.iteration}`;
   ctx.ui.setStatus("pi-dual-agent", ctx.ui.theme.fg("accent", status));
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${s % 60}s`;
 }
 
 function updateWidget(ctx: ExtensionContext): void {
@@ -95,10 +109,29 @@ function updateWidget(ctx: ExtensionContext): void {
   }
 
   const stats = getSessionManager().getTokenStats();
+  const sessionManager = getSessionManager();
+  const action = sessionManager.getCurrentAction();
+  const activeRole = state.phase === "thinking" || state.phase === "reviewing"
+    ? "thinker"
+    : state.phase === "doing" ? "doer" : null;
+
+  // Compose the "Current:" line. If we have a live action that matches
+  // the active role, show it with elapsed time. Otherwise show "(idle)".
+  let currentLine = `Current: (idle)`;
+  if (action && action.role === activeRole) {
+    const elapsed = formatDuration(Date.now() - action.startedAt);
+    currentLine = `Current: [${action.role}] ${action.text} (${elapsed})`;
+  } else if (activeRole && state.phase !== "checkpoint") {
+    currentLine = `Current: [${activeRole}] (preparing...)`;
+  } else if (state.phase === "checkpoint") {
+    currentLine = `Current: ⏸ awaiting human decision`;
+  }
+
   const lines = [
-    `Thinker: ${state.phase === "thinking" || state.phase === "reviewing" ? "Active" : "Idle"} ${state.thinkerModel?.id || ""}`,
-    `Doer: ${state.phase === "doing" ? "Active" : "Idle"} ${state.doerModel?.id || ""}`,
+    `Thinker: ${activeRole === "thinker" ? "Active" : "Idle"} ${state.thinkerModel?.id || ""}`,
+    `Doer: ${activeRole === "doer" ? "Active" : "Idle"} ${state.doerModel?.id || ""}`,
     `Mode: ${state.mode} | Phase: ${state.phase} | Iteration: ${state.iteration}`,
+    currentLine,
     `Thinker: $${stats.thinker.cost.toFixed(4)} | Doer: $${stats.doer.cost.toFixed(4)}`,
     `Total: $${(stats.thinker.cost + stats.doer.cost).toFixed(4)}`,
   ];
@@ -496,6 +529,10 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           // each phase.
           console.log(`[pi-dual-agent:phase] [${role}] ${message}`);
         },
+        onActionChange: (action) => {
+          // Live status - the widget displays the current action.
+          updateWidget(ctx);
+        },
         onTermination: (reason) => {
           state.active = false;
           state.phase = "idle";
@@ -518,9 +555,11 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     );
 
     // Wire up tracing on the session manager. This enables the
-    // per-event stream in sessions.ts (tool calls, message text, etc.).
+    // per-event stream in sessions.ts (tool calls, message text, etc.)
+    // and the live status tracker that updates the widget.
     const sessionManager = getSessionManager();
     sessionManager.setVerbose(state.trace, state.tracePath ?? undefined);
+    sessionManager.setActionListener(() => updateWidget(ctx));
     if (state.trace) {
       ctx.ui.notify(`Trace: ${state.tracePath}`, "info");
     }

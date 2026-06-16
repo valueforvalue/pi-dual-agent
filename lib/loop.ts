@@ -32,6 +32,12 @@ export interface LoopCallbacks {
    * happened even when the verbose per-event trace is off.
    */
   onTrace?: (role: "thinker" | "doer" | "review" | "system", message: string) => void;
+  /**
+   * Optional hook for live status changes. Fires when the active agent
+   * starts/stops a tool call or a message, with a short human-readable
+   * string (e.g. "write .pi/inbox/plan.md", "thinking...").
+   */
+  onActionChange?: (action: { role: "thinker" | "doer"; text: string; startedAt: number } | null) => void;
 }
 
 export class LoopOrchestrator {
@@ -224,47 +230,93 @@ export class LoopOrchestrator {
   private async phaseCheckpoint(): Promise<void> {
     this.state.phase = "checkpoint";
     this.notifyPhaseChange();
+    this.callbacks.onTrace?.("system", "CHECKPOINT - awaiting human decision");
 
-    // Show checkpoint notification to user
-    this.ctx.ui.notify(CHECKPOINT_NOTIFICATION, "info");
+    // Loud, persistent notification. Combined with the persistent status
+    // bar set by the extension, this makes the checkpoint impossible to
+    // miss: status bar shows ⏸, notification spells out the path, and
+    // the select() below is a blocking popup.
+    this.ctx.ui.notify(
+      `⏸ CHECKPOINT\n\nThe Thinker produced a plan. Review it before the Doer runs.\n\nPlan: .pi/inbox/plan.md\nSupport: docs/RESEARCH.md, docs/PRD.md, docs/TASKS.csv\n\nChoose: Approve (let Doer run) / Edit (modify the plan) / Stop.`,
+      "warning",
+    );
 
-    // Read human's decision
-    const checkpoint = await this.inbox.readCheckpoint();
-
-    if (!checkpoint) {
-      // No checkpoint file yet - prompt user
-      const choice = await this.ctx.ui.select("Checkpoint - Review plan", [
+    // Loop until the user picks Approve or Stop. Edit goes back to the top
+    // of the loop so the user can review the modified plan again.
+    while (true) {
+      const choice = await this.ctx.ui.select("⏸ CHECKPOINT - Review the plan", [
         "Approve and Execute",
-        "Edit Plan First",
+        "Edit Plan",
         "Stop",
       ]);
 
-      if (choice === "Stop" || choice === undefined) {
+      if (choice === undefined || choice === "Stop") {
         this.terminate("human_stop");
         return;
       }
 
-      if (choice === "Edit Plan First") {
-        // Let user edit the plan
+      if (choice === "Approve and Execute") {
+        // Refresh the checkpoint file with the approve decision so audit
+        // trail is preserved.
         const plan = await this.inbox.readPlan();
         if (plan) {
-          const edited = await this.ctx.ui.editor("Edit plan:", JSON.stringify(plan, null, 2));
-          if (edited) {
-            // User modified the plan - we'll use their version
-            this.ctx.ui.notify("Plan updated, proceeding with your changes", "info");
-          }
+          await this.inbox.writeCheckpoint({
+            plan,
+            humanAnnotations: "",
+            decision: "approve",
+            approvedAt: new Date().toISOString(),
+          });
         }
-      }
-    } else {
-      // User already filled out checkpoint
-      if (checkpoint.decision === "stop") {
-        this.terminate("human_stop");
+        this.callbacks.onTrace?.("system", "CHECKPOINT - approved, proceeding to Doer");
         return;
       }
 
-      if (checkpoint.decision === "modify") {
-        this.ctx.ui.notify("Plan modified, proceeding with your changes", "info");
+      if (choice === "Edit Plan") {
+        const plan = await this.inbox.readPlan();
+        if (!plan) {
+          this.ctx.ui.notify("No plan to edit.", "error");
+          continue;
+        }
+        // Open the raw markdown so the user can edit the actual file
+        // format (matching what the parser expects) rather than the
+        // serialized JSON, which would round-trip awkwardly.
+        const planPath = `${this.state.projectPath}/.pi/inbox/plan.md`;
+        const planMarkdown = await this.readPlanMarkdown(planPath);
+        const edited = await this.ctx.ui.editor(
+          "Edit plan.md (you can change step descriptions, statuses, dependencies, notes):",
+          planMarkdown,
+        );
+        if (edited !== undefined && edited !== planMarkdown) {
+          await this.inbox.writeFileRaw(planPath, edited);
+          this.ctx.ui.notify("Plan updated. Re-reviewing...", "info");
+          this.callbacks.onTrace?.("system", "CHECKPOINT - user edited plan, re-reviewing");
+          // Re-read to confirm the plan parses, then loop back to the
+          // top so the user can Approve or Edit again.
+          const reparsed = await this.inbox.readPlan();
+          if (!reparsed || reparsed.steps.length === 0) {
+            this.ctx.ui.notify("Edited plan has no parseable steps. Try again.", "error");
+            continue;
+          }
+          // Continue the while loop to show the choice again
+          continue;
+        }
+        // User cancelled or made no changes - show choice again
+        continue;
       }
+    }
+  }
+
+  /**
+   * Read the raw markdown of plan.md. We read it directly rather than
+   * going through the structured Plan type because the editor wants to
+   * show the user the file they're actually editing.
+   */
+  private async readPlanMarkdown(planPath: string): Promise<string> {
+    const fs = await import("node:fs/promises");
+    try {
+      return await fs.readFile(planPath, "utf-8");
+    } catch {
+      return "";
     }
   }
 

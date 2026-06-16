@@ -12,19 +12,93 @@
  */
 
 import { appendFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve, relative } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { ModelRef, TokenStats } from "./types";
 
 // Default tool allowlists per role.
-//   Thinker: read-only exploration + write (so it can save the plan).
-//   Doer:    full editor toolset (edit, write) plus exploration.
-const THINKER_TOOLS = ["read", "write", "bash", "grep", "find", "ls"];
+//
+// Thinker is intentionally restricted:
+//   - NO bash (could `cat > src/foo.ts` to write code)
+//   - NO edit (Doer's tool)
+//   - write is allowed, but a beforeToolCall hook physically blocks it
+//     unless the path is in .pi/inbox/ or docs/ (plans and PRDs only).
+//
+// Doer keeps the full toolset.
+const THINKER_TOOLS = ["read", "write", "grep", "find", "ls"];
 const DOER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+// Paths the Thinker is allowed to write to. Resolved against cwd at hook
+// installation time. Anything else is blocked.
+const THINKER_WRITE_ALLOWLIST = [".pi/inbox", "docs"];
 
 // Maximum chars of assistant text to dump to the trace per turn.
 // Long outputs (e.g. file dumps) get truncated to keep traces readable.
 const MAX_TEXT_CHARS = 2000;
 const MAX_TOOL_ARG_CHARS = 1500;
+
+// Public live-status shape: what the active agent is doing right now.
+export interface CurrentAction {
+  role: "thinker" | "doer";
+  text: string;
+  startedAt: number;
+}
+
+/**
+ * Build a beforeToolCall hook for the Thinker that blocks the `write`
+ * tool unless the target path is in THINKER_WRITE_ALLOWLIST.
+ *
+ * Returning { block: true, reason: "..." } from beforeToolCall tells the
+ * agent loop to skip the tool and surface the reason as a tool error,
+ * which the model sees in its context and can react to.
+ */
+function makeThinkerToolGuard(cwd: string) {
+  const allowedAbs = THINKER_WRITE_ALLOWLIST.map((d) => resolve(cwd, d));
+  return async (ctx: any): Promise<{ block?: boolean; reason?: string } | undefined> => {
+    if (ctx?.toolCall?.name !== "write") return undefined; // not a write, allow
+    const args = (ctx.args ?? {}) as { path?: string; file_path?: string };
+    const rawPath = args.path ?? args.file_path ?? "";
+    if (!rawPath) return undefined; // let the tool's own validation handle it
+    const abs = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+    const isAllowed = allowedAbs.some(
+      (dir) => abs === dir || abs.startsWith(dir + "/") || abs.startsWith(dir + "\\"),
+    );
+    if (!isAllowed) {
+      const relAllowed = THINKER_WRITE_ALLOWLIST.join(", ");
+      return {
+        block: true,
+        reason:
+          `Thinker cannot write to "${rawPath}". ` +
+          `Allowed paths: ${relAllowed}/ (plans, PRDs, docs). ` +
+          `Code files (*.html, *.js, *.ts, *.css, etc.) must be written by the Doer ` +
+          `at the execution phase, after the human has approved the plan at the checkpoint.`,
+      };
+    }
+    return undefined;
+  };
+}
+
+/**
+ * Turn a tool call into a short, human-readable description for the
+ * live status display and trace.
+ */
+function describeToolCall(name: string, args: any): string {
+  if (!args || typeof args !== "object") return name;
+  const path = (args as any).path ?? (args as any).file_path;
+  const cmd = (args as any).command;
+  const pattern = (args as any).pattern;
+  const truncCmd = (s: string) => (s.length > 60 ? s.slice(0, 60) + "..." : s);
+  switch (name) {
+    case "read":         return path ? `read ${path}` : "read";
+    case "write":        return path ? `write ${path}` : "write";
+    case "edit":         return path ? `edit ${path}` : "edit";
+    case "bash":         return cmd ? `run: ${truncCmd(cmd)}` : "run bash";
+    case "grep":         return pattern ? `grep ${pattern}` : "grep";
+    case "find":         return pattern ? `find ${pattern}` : "find";
+    case "ls":           return path ? `ls ${path}` : "ls";
+    default:             return name;
+  }
+}
 
 // We need to dynamically import to avoid issues when extension loads
 let createAgentSession: any;
@@ -62,6 +136,32 @@ export class SessionManagerClass {
   private verbose = false;
   private traceFilePath: string | null = null;
   private turnCount = { thinker: 0, doer: 0 };
+
+  // Live status: what the active agent is doing right now.
+  private currentAction: CurrentAction | null = null;
+  private actionListener: ((action: CurrentAction | null) => void) | null = null;
+
+  setActionListener(fn: ((action: CurrentAction | null) => void) | null): void {
+    this.actionListener = fn;
+  }
+
+  getCurrentAction(): CurrentAction | null {
+    return this.currentAction ? { ...this.currentAction } : null;
+  }
+
+  private setAction(role: "thinker" | "doer", text: string | null): void {
+    if (text === null) {
+      // Clear only if the cleared action belongs to this role, so we don't
+      // wipe the Doer's status when the Thinker finishes.
+      if (this.currentAction?.role === role) {
+        this.currentAction = null;
+        this.actionListener?.(null);
+      }
+    } else {
+      this.currentAction = { role, text, startedAt: Date.now() };
+      this.actionListener?.(this.currentAction);
+    }
+  }
 
   /**
    * Enable or disable verbose tracing. When enabled, every event from both
@@ -178,8 +278,14 @@ export class SessionManagerClass {
       thinkingLevel: "high",
     });
 
+    // Install the tool guard. Without this, the Thinker could `write` to
+    // any path and silently do the Doer's work before the checkpoint.
+    // The hook is checked per tool call by the agent loop, so it cannot
+    // be bypassed by clever prompt-engineering.
+    session.agent.beforeToolCall = makeThinkerToolGuard(cwd);
+
     this.turnCount.thinker = 0;
-    this.trace("thinker", `session created model=${model.provider}/${model.id} tools=[${tools.join(",")}]`);
+    this.trace("thinker", `session created model=${model.provider}/${model.id} tools=[${tools.join(",")}] guard=write:${THINKER_WRITE_ALLOWLIST.join(",")}`);
 
     const handle: SessionHandle = {
       session,
@@ -247,10 +353,12 @@ export class SessionManagerClass {
     switch (event.type) {
       case "agent_start":
         this.trace("thinker", "agent_start");
+        this.setAction("thinker", "starting...");
         break;
       case "agent_end": {
         const msgCount = event.messages?.length ?? 0;
         this.trace("thinker", `agent_end messages=${msgCount} willRetry=${event.willRetry ?? false}`);
+        this.setAction("thinker", null);
         break;
       }
       case "turn_start":
@@ -267,6 +375,9 @@ export class SessionManagerClass {
       case "message_start": {
         const role = event.message?.role ?? "?";
         this.trace("thinker", `message_start role=${role}`);
+        if (role === "assistant") {
+          this.setAction("thinker", "thinking...");
+        }
         break;
       }
       case "message_update": {
@@ -310,10 +421,15 @@ export class SessionManagerClass {
       case "tool_execution_start": {
         const args = this.truncate(JSON.stringify(event.args ?? {}), MAX_TOOL_ARG_CHARS);
         this.trace("thinker", `tool_start name=${event.toolName} callId=${event.toolCallId} args=${args}`);
+        // Update live status so the widget can show "write_artifact plan.md"
+        this.setAction("thinker", describeToolCall(event.toolName, event.args));
         break;
       }
       case "tool_execution_end": {
         this.trace("thinker", `tool_end name=${event.toolName} callId=${event.toolCallId} isError=${event.isError ?? false}`);
+        // Don't clear action on tool end - the next event (next tool, or
+        // agent_end) will update it. Leaving the action visible while the
+        // model is thinking about the tool result is more informative.
         break;
       }
       case "tool_execution_update":
@@ -335,10 +451,12 @@ export class SessionManagerClass {
     switch (event.type) {
       case "agent_start":
         this.trace("doer", "agent_start");
+        this.setAction("doer", "starting...");
         break;
       case "agent_end": {
         const msgCount = event.messages?.length ?? 0;
         this.trace("doer", `agent_end messages=${msgCount} willRetry=${event.willRetry ?? false}`);
+        this.setAction("doer", null);
         break;
       }
       case "turn_start":
@@ -352,6 +470,9 @@ export class SessionManagerClass {
       }
       case "message_start": {
         this.trace("doer", `message_start role=${event.message?.role ?? "?"}`);
+        if (event.message?.role === "assistant") {
+          this.setAction("doer", "thinking...");
+        }
         break;
       }
       case "message_end": {
@@ -380,6 +501,7 @@ export class SessionManagerClass {
       case "tool_execution_start": {
         const args = this.truncate(JSON.stringify(event.args ?? {}), MAX_TOOL_ARG_CHARS);
         this.trace("doer", `tool_start name=${event.toolName} callId=${event.toolCallId} args=${args}`);
+        this.setAction("doer", describeToolCall(event.toolName, event.args));
         break;
       }
       case "tool_execution_end": {
