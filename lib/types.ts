@@ -96,14 +96,51 @@ export type TerminationReason =
   | "max_iterations"
   | "error_threshold";
 
-// Config file structure
-export interface Config {
-  version: string;
+// ========================================
+// Persisted config
+// ========================================
+//
+// Shape of the file at ~/.pi/agent/config/pi-dual-agent.json (see
+// docs/PRD.md, "Persistence" section). The schema version lets
+// loadConfig() reject (or migrate) configs written by an older version
+// of the extension. v1 is the initial shape; bump this whenever a
+// field is added/renamed/removed in an incompatible way.
+
+export const CONFIG_SCHEMA_VERSION = 1;
+
+export interface TraceConfig {
+  enabled: boolean;
+  /** Absolute path; null means "use the project default (.pi/inbox/trace.log)". */
+  path: string | null;
+}
+
+export interface PersistedConfig {
+  schemaVersion: number;
   thinkerModel: ModelRef | null;
   doerModel: ModelRef | null;
   defaultMode: DualMode;
   maxIterations: number;
+  trace: TraceConfig;
+  /** ISO timestamp of the last write. Informational only. */
+  updatedAt: string;
 }
+
+/**
+ * Default config used when no file exists, the file is unreadable, or
+ * the schema version is newer than what this build understands.
+ */
+export const DEFAULT_CONFIG: PersistedConfig = {
+  schemaVersion: CONFIG_SCHEMA_VERSION,
+  thinkerModel: null,
+  doerModel: null,
+  defaultMode: "simple",
+  maxIterations: 50,
+  trace: {
+    enabled: false,
+    path: null,
+  },
+  updatedAt: "",
+};
 
 // Session info for persistence
 export interface SessionInfo {

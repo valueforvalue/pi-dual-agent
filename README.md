@@ -76,6 +76,7 @@ npm install github:YOUR_USERNAME/pi-dual-agent
 /dual models         # Show current model assignments
 /dual thinker <id>   # Set Thinker model (e.g., anthropic/claude-opus-4-5)
 /dual doer <id>      # Set Doer model (e.g., anthropic/claude-sonnet-4-5)
+/dual config         # Show the persisted config (path + values)
 ```
 
 ### Control Commands
@@ -289,6 +290,36 @@ Total: $0.0234
 | Model config | `~/.pi/agent/config/pi-dual-agent.json` |
 | Sessions | `~/.pi/agent/sessions/pi-dual-agent/` |
 | Cost history | `~/.pi/agent/stats/pi-dual-agent/` |
+
+### What is persisted
+
+User **preferences** survive across pi sessions:
+
+- Thinker and Doer model selection
+- Default mode (`simple` or `complex`)
+- Trace settings (enabled, output path)
+
+Transient loop state (active phase, current iteration, in-flight task description) is **not** persisted — when you close pi, the running loop dies with it. The next session starts fresh, but your model selection is already loaded.
+
+### When it is read and written
+
+- **Read once** at `session_start` — the saved models and defaults are restored into the in-memory state.
+- **Written** every time a preference changes:
+  - `/dual setup` (interactive picker)
+  - `/dual thinker <provider/id>` and `/dual doer <provider/id>`
+  - `/dual start <task> --complex` / `--simple` (only when the user passes the flag — auto-detected mode from existing artifacts is not persisted as the new default)
+  - `/dual trace on|off|path <file>` (the `status` subcommand is read-only)
+  - `/dual stop`
+
+### Inspecting the saved config
+
+```
+/dual config
+```
+
+prints the current persisted values and the absolute path of the file, so you can `cat` / edit / back it up. (The path differs per OS — Windows uses `%USERPROFILE%\.pi\agent\config\pi-dual-agent.json`, macOS/Linux use `~/.pi/agent/config/pi-dual-agent.json`.)
+
+If the file is missing, unreadable, contains invalid JSON, or was written by a newer version of the extension, the defaults are used and a warning is logged to the console. The extension never fails to load because of a config problem.
 
 ## Error Handling
 

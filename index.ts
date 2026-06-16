@@ -15,10 +15,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
-import type { DualAgentState, TokenStats, DualMode, ModelRef } from "./lib/types";
+import type { DualAgentState, TokenStats, DualMode, ModelRef, PersistedConfig } from "./lib/types";
 import { getSessionManager, resetSessionManager } from "./lib/sessions";
 import { createOrchestrator, destroyOrchestrator, getOrchestrator } from "./lib/loop";
 import { createInboxManager } from "./lib/inbox";
+import { loadConfig, saveConfig, getConfigPath } from "./lib/config";
 
 // ========================================
 // State
@@ -55,15 +56,50 @@ let state: ExtensionState = {
 // ========================================
 // Persistence
 // ========================================
+//
+// User preferences (model selection, default mode, trace settings) are
+// written to ~/.pi/agent/config/pi-dual-agent.json and read back at
+// session_start. Transient runtime state (active, iteration, phase,
+// errorCount, taskDescription) is intentionally NOT persisted — the
+// loop state is meant to die with the session. See lib/config.ts for
+// the on-disk shape and failure handling.
 
-function persistState(): void {
-  // Note: This is a simplified version - full persistence would save to disk
-  // For now, state is session-scoped
+let configLoaded = false;
+
+function buildPersistedConfig(): PersistedConfig {
+  return {
+    schemaVersion: 1,
+    thinkerModel: state.thinkerModel,
+    doerModel: state.doerModel,
+    defaultMode: state.mode,
+    maxIterations: 50,
+    trace: {
+      enabled: state.trace,
+      path: state.tracePath,
+    },
+    updatedAt: "", // overwritten by saveConfig with the real timestamp
+  };
 }
 
-function loadState(_ctx: ExtensionContext): void {
-  // Load from session entries if available
-  // For now, start fresh
+async function persistState(): Promise<void> {
+  await saveConfig(buildPersistedConfig());
+}
+
+async function loadState(_ctx: ExtensionContext): Promise<void> {
+  const config = await loadConfig();
+  configLoaded = true;
+
+  // Restore user preferences into the in-memory state. We do NOT touch
+  // the transient fields (active, iteration, phase, errorCount,
+  // taskDescription) — those always start fresh.
+  if (config.thinkerModel) state.thinkerModel = config.thinkerModel;
+  if (config.doerModel) state.doerModel = config.doerModel;
+  state.mode = config.defaultMode;
+  state.trace = config.trace.enabled;
+  // Empty-string check matters: getTraceFilePath() defaults to the
+  // project-local path when state.tracePath is null, so restoring an
+  // explicit null from config means "use the default location".
+  state.tracePath = config.trace.path ?? null;
 }
 
 // ========================================
@@ -279,7 +315,7 @@ async function pickModels(ctx: ExtensionContext): Promise<void> {
   };
 
   ctx.ui.notify(`Thinker: ${thinkerChoice}, Doer: ${doerChoice}`, "info");
-  persistState();
+  await persistState();
 }
 
 // ========================================
@@ -296,7 +332,7 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   pi.registerCommand("dual", {
     description: "Dual agent: setup, start, pause, resume, stop, status",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "models", "thinker", "doer", "trace", "start", "pause", "resume", "skip", "restart", "stop", "status"];
+      const subs = ["setup", "models", "thinker", "doer", "trace", "config", "start", "pause", "resume", "skip", "restart", "stop", "status"];
       return subs.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     handler: async (args, ctx) => {
@@ -323,7 +359,7 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
             const [provider, ...idParts] = rest.split("/");
             state.thinkerModel = { provider, id: idParts.join("/") };
             ctx.ui.notify(`Thinker set to: ${rest}`, "info");
-            persistState();
+            await persistState();
           } else {
             showModels(ctx);
           }
@@ -334,14 +370,18 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
             const [provider, ...idParts] = rest.split("/");
             state.doerModel = { provider, id: idParts.join("/") };
             ctx.ui.notify(`Doer set to: ${rest}`, "info");
-            persistState();
+            await persistState();
           } else {
             showModels(ctx);
           }
           break;
 
         case "trace":
-          handleTrace(rest, ctx);
+          await handleTrace(rest, ctx);
+          break;
+
+        case "config":
+          showConfig(ctx);
           break;
 
         case "start":
@@ -394,8 +434,8 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   // ========================================
 
   pi.on("session_start", async (_event, ctx) => {
-    loadState(ctx);
     state.projectPath = ctx.cwd;
+    await loadState(ctx);
     updateStatusBar(ctx);
     if (state.active) {
       updateWidget(ctx);
@@ -429,16 +469,44 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     );
   }
 
-  function handleTrace(rest: string, ctx: ExtensionContext): void {
+  function showConfig(ctx: ExtensionContext): void {
+    // Show the user where their preferences are stored, plus a summary.
+    // This is the "I want to know what's persisted" escape hatch.
+    const thinker = state.thinkerModel
+      ? `${state.thinkerModel.provider}/${state.thinkerModel.id}`
+      : "(not set)";
+    const doer = state.doerModel
+      ? `${state.doerModel.provider}/${state.doerModel.id}`
+      : "(not set)";
+    const tracePath = state.tracePath ?? `(default: ${state.projectPath}/.pi/inbox/trace.log)`;
+    ctx.ui.notify(
+      `Persisted config: ${getConfigPath()}\n\n` +
+        `Thinker: ${thinker}\n` +
+        `Doer:    ${doer}\n` +
+        `Default mode: ${state.mode}\n` +
+        `Trace: ${state.trace ? "ON" : "OFF"}\n` +
+        `Trace path: ${tracePath}\n\n` +
+        (configLoaded
+          ? "Loaded from disk at session start. Use /dual setup or /dual thinker|doer to change."
+          : "Config has not been loaded yet in this session."),
+      "info",
+    );
+  }
+
+  async function handleTrace(rest: string, ctx: ExtensionContext): Promise<void> {
     const arg = rest.trim();
+    let changed = false;
     if (arg === "on" || arg === "") {
       state.trace = true;
       state.tracePath = state.tracePath ?? `${state.projectPath}/.pi/inbox/trace.log`;
       ctx.ui.notify(`Trace ON: ${state.tracePath}`, "info");
+      changed = true;
     } else if (arg === "off") {
       state.trace = false;
       ctx.ui.notify("Trace OFF", "info");
+      changed = true;
     } else if (arg === "status") {
+      // Status is a read-only query - no state change, no need to persist.
       ctx.ui.notify(
         `Trace: ${state.trace ? "ON" : "OFF"}\nPath: ${state.tracePath ?? "(default: .pi/inbox/trace.log)"}`,
         "info"
@@ -446,9 +514,11 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     } else if (arg.startsWith("path ")) {
       state.tracePath = arg.slice(5).trim();
       ctx.ui.notify(`Trace path set: ${state.tracePath}`, "info");
+      changed = true;
     } else {
       ctx.ui.notify("Usage: /dual trace on|off|status|path <file>", "warning");
     }
+    if (changed) await persistState();
   }
 
   function showFullStatus(ctx: ExtensionContext): void {
@@ -470,14 +540,20 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    // Parse mode from flags
+    // Parse mode from flags. Track whether the user EXPLICITLY set it
+    // with a flag — we persist that as the new default, but we do NOT
+    // persist the auto-detected mode below, since that's per-run
+    // behaviour, not a user preference.
     let mode: DualMode = state.mode;
+    let userSetMode = false;
     if (task.includes("--complex")) {
       mode = "complex";
       task = task.replace(/--complex/g, "").trim();
+      userSetMode = true;
     } else if (task.includes("--simple")) {
       mode = "simple";
       task = task.replace(/--simple/g, "").trim();
+      userSetMode = true;
     }
 
     // Check for existing artifacts to auto-detect mode
@@ -499,7 +575,17 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
 
     updateStatusBar(ctx);
     updateWidget(ctx);
-    persistState();
+    // Only update the persisted default if the user asked for it.
+    // Auto-detected mode is a property of the current run, not a
+    // preference, so we don't want to leak it into the saved default.
+    if (userSetMode) {
+      await persistState();
+    } else {
+      // Still write the file so any in-flight model/trace changes
+      // are captured. We pass through the current defaultMode, which
+      // equals the value loaded from disk at session_start.
+      await saveConfig(buildPersistedConfig());
+    }
 
     ctx.ui.notify(`Started dual mode (${mode}): ${task}`, "info");
 
@@ -622,7 +708,7 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     updateStatusBar(ctx);
     ctx.ui.setWidget("pi-dual-agent", []);
     ctx.ui.notify("Stopped dual mode", "info");
-    persistState();
+    await persistState();
   }
 
   // ========================================
