@@ -157,7 +157,10 @@ export class SessionManagerClass {
     stats.cacheRead += usage.cacheRead || 0;
     stats.cacheWrite += usage.cacheWrite || 0;
     stats.totalTokens += usage.totalTokens || 0;
-    stats.cost += usage.cost?.total || 0;
+    // Handle cost - may not exist on all providers
+    if (usage.cost && typeof usage.cost === 'object') {
+      stats.cost += (usage.cost as { total?: number }).total || 0;
+    }
     stats.turns += 1;
   }
 
