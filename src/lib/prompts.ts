@@ -193,7 +193,7 @@ The workflow has finished.
 
 Final status:
 - Iterations: {count}
-- Total cost: ${cost}
+- Total cost: <calculated at runtime>
 
 Results summary available in .pi/inbox/results.md
 `;
