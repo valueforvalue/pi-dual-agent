@@ -13,6 +13,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import type { DualAgentState, TokenStats, DualMode, ModelRef } from "./lib/types";
 import { getSessionManager, resetSessionManager } from "./lib/sessions";
 import { createOrchestrator, destroyOrchestrator, getOrchestrator } from "./lib/loop";
@@ -103,6 +105,110 @@ function updateWidget(ctx: ExtensionContext): void {
 // Model Selection
 // ========================================
 
+interface ModelChoice {
+  value: string;  // "provider/id"
+  label: string;  // "provider/id"
+  description: string;  // "Reasoning" or ""
+}
+
+function buildModelChoices(available: ModelRef[]): ModelChoice[] {
+  const seen = new Set<string>();
+  const choices: ModelChoice[] = [];
+
+  for (const m of available) {
+    const value = `${m.provider}/${m.id}`;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    choices.push({
+      value,
+      label: value,
+      description: m.reasoning ? "reasoning" : "",
+    });
+  }
+
+  return choices;
+}
+
+async function pickModelCustom(
+  ctx: ExtensionContext,
+  title: string,
+  choices: ModelChoice[],
+): Promise<string | null> {
+  const items: SelectItem[] = choices.map(c => ({
+    value: c.value,
+    label: c.label,
+    description: c.description,
+  }));
+
+  return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+    const container = new Container();
+
+    // Top border
+    container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+    // Title
+    container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+
+    // Subtitle with model count
+    container.addChild(new Text(theme.fg("dim", `${items.length} models available - use filter to narrow`), 1, 0));
+
+    // SelectList with theme - show max 10 items, scrolls properly
+    const selectList = new SelectList(items, Math.min(items.length, 10), {
+      selectedPrefix: (t) => theme.fg("accent", t),
+      selectedText: (t) => theme.fg("accent", t),
+      description: (t) => theme.fg("muted", t),
+      scrollInfo: (t) => theme.fg("dim", t),
+      noMatch: (t) => theme.fg("warning", t),
+    });
+    selectList.onSelect = (item) => done(item.value);
+    selectList.onCancel = () => done(null);
+    container.addChild(selectList);
+
+    // Help text
+    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
+
+    // Bottom border
+    container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+    return {
+      render: (w) => container.render(w),
+      invalidate: () => container.invalidate(),
+      handleInput: (data) => { selectList.handleInput(data); tui.requestRender(); },
+    };
+  });
+}
+
+async function pickModelWithFilter(
+  ctx: ExtensionContext,
+  title: string,
+  choices: ModelChoice[],
+): Promise<string | null> {
+  // Ask for filter first
+  const filter = await ctx.ui.input(`${title} (type to filter)`, "");
+
+  if (filter === undefined) {
+    return null; // Cancelled
+  }
+
+  if (filter.trim() === "") {
+    return await pickModelCustom(ctx, title, choices);
+  }
+
+  // Filter models
+  const lowerFilter = filter.toLowerCase();
+  const filtered = choices.filter(c =>
+    c.label.toLowerCase().includes(lowerFilter) ||
+    c.description.toLowerCase().includes(lowerFilter)
+  );
+
+  if (filtered.length === 0) {
+    ctx.ui.notify("No matches. Try a different filter.", "warning");
+    return null;
+  }
+
+  return await pickModelCustom(ctx, `${title} (filter: ${filter})`, filtered);
+}
+
 async function pickModels(ctx: ExtensionContext): Promise<void> {
   const sessionManager = getSessionManager();
   const available = await sessionManager.getAvailableModels();
@@ -112,11 +218,10 @@ async function pickModels(ctx: ExtensionContext): Promise<void> {
     return;
   }
 
-  // Group by provider
-  const choices = available.map(m => `${m.provider}/${m.id}`);
-  const uniqueChoices = [...new Set(choices)];
+  const choices = buildModelChoices(available);
 
-  const thinkerChoice = await ctx.ui.select("Select Thinker model:", uniqueChoices);
+  // Pick Thinker
+  const thinkerChoice = await pickModelWithFilter(ctx, "Select Thinker model", choices);
   if (!thinkerChoice) return;
 
   const [thinkerProvider, ...thinkerIdParts] = thinkerChoice.split("/");
@@ -126,7 +231,8 @@ async function pickModels(ctx: ExtensionContext): Promise<void> {
     reasoning: available.find(m => `${m.provider}/${m.id}` === thinkerChoice)?.reasoning,
   };
 
-  const doerChoice = await ctx.ui.select("Select Doer model:", uniqueChoices);
+  // Pick Doer
+  const doerChoice = await pickModelWithFilter(ctx, "Select Doer model", choices);
   if (!doerChoice) return;
 
   const [doerProvider, ...doerIdParts] = doerChoice.split("/");
