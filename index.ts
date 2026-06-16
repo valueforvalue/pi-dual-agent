@@ -622,11 +622,16 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           updateWidget(ctx);
         },
         onTrace: (role, message) => {
-          // One-line-per-phase trace, visible in console even without
-          // the per-event trace from sessions.ts. Useful as a smoke test:
-          // if you see these lines, the orchestrator actually reached
-          // each phase.
-          console.log(`[pi-dual-agent:phase] [${role}] ${message}`);
+          // One-line-per-phase trace. We deliberately do NOT write this
+          // to stdout via console.log — that bypasses the TUI's render
+          // region and paints orphan text over the screen ("UI clobber").
+          //
+          // The full per-event stream still goes to the trace file
+          // (sessions.ts) when /dual trace on is set, so nothing is
+          // lost. This callback is a no-op for now; if a future
+          // iteration needs a live "what just happened" line, the right
+          // place for it is the widget (setWidget) or status bar
+          // (setStatus), not stdout.
         },
         onActionChange: (action) => {
           // Live status - the widget displays the current action.
@@ -754,5 +759,8 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     default: false,
   });
 
-  console.log("[pi-dual-agent] loaded - /dual setup|start|pause|resume|stop|status");
+  // Intentionally no console.log here. The TUI uses an alternate
+  // screen buffer, and stdout writes from extension load code persist
+  // as orphan lines on screen. /dual status (or the widget) is how the
+  // user discovers the extension.
 }
