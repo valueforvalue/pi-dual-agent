@@ -5,7 +5,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { ModelRef, TokenStats, Phase } from "./types";
+import type { ModelRef, TokenStats } from "./types";
 
 // We need to dynamically import to avoid issues when extension loads
 let createAgentSession: any;
@@ -29,18 +29,22 @@ export interface SessionHandle {
 }
 
 export class SessionManagerClass {
-  private authStorage: any;
-  private modelRegistry: any;
+  private authStorage: any = null;
+  private modelRegistry: any = null;
   private thinkerSession: SessionHandle | null = null;
   private doerSession: SessionHandle | null = null;
   private tokenStats: { thinker: TokenStats; doer: TokenStats } = {
     thinker: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 },
     doer: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 },
   };
+  private initialized = false;
 
-  constructor() {
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    await ensureImports();
     this.authStorage = AuthStorage.create();
     this.modelRegistry = ModelRegistry.create(this.authStorage);
+    this.initialized = true;
   }
 
   private emptyTokenStats(): TokenStats {
@@ -56,7 +60,7 @@ export class SessionManagerClass {
   }
 
   async getAvailableModels(): Promise<ModelRef[]> {
-    await ensureImports();
+    await this.ensureInitialized();
     const models = await this.modelRegistry.getAvailable();
     return models.map((m: any) => ({
       provider: m.provider,
@@ -67,7 +71,7 @@ export class SessionManagerClass {
   }
 
   findModel(provider: string, id: string): any {
-    return this.modelRegistry.find(provider, id);
+    return this.modelRegistry?.find(provider, id);
   }
 
   async createThinkerSession(
@@ -75,7 +79,7 @@ export class SessionManagerClass {
     cwd: string,
     sessionPath?: string
   ): Promise<SessionHandle> {
-    await ensureImports();
+    await this.ensureInitialized();
 
     const modelObj = this.findModel(model.provider, model.id);
     if (!modelObj) {
@@ -108,7 +112,7 @@ export class SessionManagerClass {
     cwd: string,
     sessionPath?: string
   ): Promise<SessionHandle> {
-    await ensureImports();
+    await this.ensureInitialized();
 
     const modelObj = this.findModel(model.provider, model.id);
     if (!modelObj) {
@@ -126,7 +130,6 @@ export class SessionManagerClass {
       sessionManager: manager,
       authStorage: this.authStorage,
       modelRegistry: this.modelRegistry,
-      // Doer might need different tool config
     });
 
     const handle: SessionHandle = {
@@ -158,7 +161,7 @@ export class SessionManagerClass {
     stats.cacheWrite += usage.cacheWrite || 0;
     stats.totalTokens += usage.totalTokens || 0;
     // Handle cost - may not exist on all providers
-    if (usage.cost && typeof usage.cost === 'object') {
+    if (usage.cost && typeof usage.cost === "object") {
       stats.cost += (usage.cost as { total?: number }).total || 0;
     }
     stats.turns += 1;
