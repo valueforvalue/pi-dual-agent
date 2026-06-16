@@ -391,22 +391,31 @@ Check console for errors:
 
 ## Development
 
+This repo is the source of truth. The live install at
+`%USERPROFILE%\.pi\agent\extensions\pi-dual-agent` is a separate
+clone that you sync from this one — **do not edit files in the
+install directly**, since uncommitted changes there can be
+silently destroyed. See [WORKFLOW.md](./WORKFLOW.md) for the
+full loop. The short version:
+
 ```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/pi-dual-agent.git
-cd pi-dual-agent
+# 1. Edit, test, commit in this dev repo
+cd C:\Development\pi-dual-agent
+# ... make changes ...
+node test/tool-guard.test.mjs   # quick sanity check
+git add -A && git commit -m "..."
 
-# Install dependencies
-npm install
+# 2. Push, then sync to the live install
+git push origin master
+scripts\sync-to-install.bat     # or ./scripts/sync-to-install.sh
 
-# Link for development
-npm link
-cd ~/.pi/agent/extensions
-npm link pi-dual-agent
-
-# Reload pi
+# 3. In pi, reload to pick up the new code
 /reload
 ```
+
+The `sync-to-install` script refuses to run if either side has
+uncommitted changes — fail-fast is intentional, so you don't
+accidentally wipe working changes.
 
 ## Contributing
 
