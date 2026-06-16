@@ -2,10 +2,10 @@
   "name": "pi-dual-agent",
   "version": "0.1.0",
   "description": "Dual-agent system for pi: Thinker + Doer with human checkpoints",
-  "main": "src/index.ts",
+  "main": "index.ts",
   "keywords": ["pi-package", "pi-extension"],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": ["./index.ts"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
