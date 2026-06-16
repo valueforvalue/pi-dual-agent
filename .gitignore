@@ -8,3 +8,4 @@ dist/
 build/
 coverage/
 *.tgz
+test/_e2e-sandbox/
