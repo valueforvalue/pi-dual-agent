@@ -37,6 +37,22 @@ const THINKER_WRITE_ALLOWLIST = [".pi/inbox", "docs"];
 const MAX_TEXT_CHARS = 2000;
 const MAX_TOOL_ARG_CHARS = 1500;
 
+// Max size of the on-disk trace file before it is rotated. 1 MB keeps the
+// file readable and prevents the TUI's filesystem view from getting
+// destroyed by a runaway trace. Each rotation splits into trace.log.1
+// (the previous run) and starts a fresh trace.log.
+const MAX_TRACE_BYTES = 1_048_576; // 1 MiB
+
+// Events we never want to write to the trace. message_update fires on
+// every streaming text delta from the LLM, which can be dozens-to-
+// hundreds of events per turn. Logging each one is what made the trace
+// blow up to 800+ KB and flood the host TUI. The default branch in the
+// switch would otherwise pick these up.
+const TRACE_SKIP_EVENTS = new Set<string>([
+  "message_update",
+  "tool_execution_update",
+]);
+
 // Public live-status shape: what the active agent is doing right now.
 export interface CurrentAction {
   role: "thinker" | "doer";
@@ -132,8 +148,11 @@ export class SessionManagerClass {
   };
   private initialized = false;
 
-  // Tracing state
+  // Tracing state. `verbose` enables file+console output; `consoleEcho`
+  // is a separate opt-in because file-only traces are usually what you
+  // want — the host TUI does not need a live copy of every event.
   private verbose = false;
+  private consoleEcho = false;
   private traceFilePath: string | null = null;
   private turnCount = { thinker: 0, doer: 0 };
 
@@ -165,8 +184,10 @@ export class SessionManagerClass {
 
   /**
    * Enable or disable verbose tracing. When enabled, every event from both
-   * the Thinker and Doer sessions is written to the trace file (if provided)
-   * and to the host console. The trace file is truncated on enable.
+   * the Thinker and Doer sessions is written to the trace file (if provided).
+   * Console echoing is opt-in via setConsoleEcho() — by default we only
+   * write to disk, so the host TUI is not spammed with event lines.
+   * The trace file is truncated on enable.
    */
   setVerbose(verbose: boolean, traceFilePath?: string): void {
     this.verbose = verbose;
@@ -181,6 +202,15 @@ export class SessionManagerClass {
     }
   }
 
+  /**
+   * When true, trace lines are also printed to the host console. Off by
+   * default — file-only traces are the common case, and the host TUI
+   * does not benefit from a live firehose of event lines.
+   */
+  setConsoleEcho(echo: boolean): void {
+    this.consoleEcho = echo;
+  }
+
   isVerbose(): boolean {
     return this.verbose;
   }
@@ -190,21 +220,43 @@ export class SessionManagerClass {
   }
 
   /**
-   * Append a line to the trace. Always also echoed to the host console
-   * (pi extensions share a console with the host CLI), prefixed so the
-   * source line is obvious in mixed output.
+   * Append a line to the trace. File output is gated by `verbose`;
+   * console output is additionally gated by `consoleEcho` so that
+   * turning the file trace on does not flood the host TUI.
+   *
+   * The on-disk file is rotated to trace.log.1 when it crosses
+   * MAX_TRACE_BYTES, so a long-running session never produces a
+   * multi-megabyte trace file that destroys the TUI's filesystem view.
    */
   private trace(role: "thinker" | "doer", line: string): void {
     if (!this.verbose) return;
     const stamped = `[${new Date().toISOString()}] [${role}] ${line}`;
-    // Console: prefix with extension tag so users can filter.
-    console.log(`[pi-dual-agent:trace] ${stamped}`);
+    if (this.consoleEcho) {
+      console.log(`[pi-dual-agent:trace] ${stamped}`);
+    }
     if (this.traceFilePath) {
       try {
+        this.rotateIfTooBig(this.traceFilePath);
         appendFileSync(this.traceFilePath, stamped + "\n", "utf-8");
       } catch {
         // swallow - tracing is best-effort
       }
+    }
+  }
+
+  /**
+   * If the trace file has exceeded MAX_TRACE_BYTES, rotate it to
+   * `<path>.1` (overwriting any previous rotation) and start a fresh
+   * file. We keep only one generation to avoid filling the inbox.
+   */
+  private rotateIfTooBig(path: string): void {
+    try {
+      const { statSync, renameSync } = require("node:fs") as typeof import("node:fs");
+      const stats = statSync(path);
+      if (stats.size < MAX_TRACE_BYTES) return;
+      renameSync(path, `${path}.1`);
+    } catch {
+      // stat fails (file missing) — nothing to rotate.
     }
   }
 
@@ -381,13 +433,9 @@ export class SessionManagerClass {
         break;
       }
       case "message_update": {
-        // Streaming delta. We only log the final text once on message_end,
-        // but if streaming text comes through, we capture it here.
-        const ame = event.assistantMessageEvent;
-        if (ame?.type === "text_delta" && typeof ame.delta === "string") {
-          // Intentionally not logged per-delta to avoid trace spam.
-          // Final text is dumped on message_end.
-        }
+        // Streaming delta. Intentionally swallowed — not logging per-delta
+        // avoids trace spam (the SDK fires dozens of these per turn). The
+        // final text is dumped on message_end instead.
         break;
       }
       case "message_end": {
@@ -436,7 +484,13 @@ export class SessionManagerClass {
         // Per-tool streaming updates - not logged to keep trace readable.
         break;
       default:
-        this.trace("thinker", `event type=${event.type}`);
+        // Drop noisy events entirely instead of logging them. The previous
+        // behaviour was to log every unknown event type, which (combined
+        // with the default fall-through for message_update) produced the
+        // 14k-line / 800KB+ trace that trashed the TUI.
+        if (!TRACE_SKIP_EVENTS.has(event.type)) {
+          this.trace("thinker", `event type=${event.type}`);
+        }
     }
   }
 
@@ -511,7 +565,9 @@ export class SessionManagerClass {
       case "tool_execution_update":
         break;
       default:
-        this.trace("doer", `event type=${event.type}`);
+        if (!TRACE_SKIP_EVENTS.has(event.type)) {
+          this.trace("doer", `event type=${event.type}`);
+        }
     }
   }
 

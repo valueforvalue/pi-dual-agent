@@ -36,6 +36,7 @@ interface ExtensionState {
   taskDescription: string;
   projectPath: string;
   trace: boolean;
+  consoleEcho: boolean;
   tracePath: string | null;
 }
 
@@ -50,6 +51,7 @@ let state: ExtensionState = {
   taskDescription: "",
   projectPath: "",
   trace: false,
+  consoleEcho: false,
   tracePath: null,
 };
 
@@ -96,9 +98,10 @@ async function loadState(_ctx: ExtensionContext): Promise<void> {
   if (config.doerModel) state.doerModel = config.doerModel;
   state.mode = config.defaultMode;
   state.trace = config.trace.enabled;
-  // Empty-string check matters: getTraceFilePath() defaults to the
-  // project-local path when state.tracePath is null, so restoring an
-  // explicit null from config means "use the default location".
+  // `consoleEcho` is accepted on read so a config from a future build
+  // that adds the field still loads, but this build's sanitizer
+  // doesn't surface it. The in-memory default stays at false; the
+  // user can opt in with `/dual trace echo`.
   state.tracePath = config.trace.path ?? null;
 }
 
@@ -499,16 +502,26 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
     if (arg === "on" || arg === "") {
       state.trace = true;
       state.tracePath = state.tracePath ?? `${state.projectPath}/.pi/inbox/trace.log`;
-      ctx.ui.notify(`Trace ON: ${state.tracePath}`, "info");
+      ctx.ui.notify(`Trace ON (file only): ${state.tracePath}`, "info");
       changed = true;
     } else if (arg === "off") {
       state.trace = false;
       ctx.ui.notify("Trace OFF", "info");
       changed = true;
+    } else if (arg === "echo" || arg === "console") {
+      state.consoleEcho = true;
+      state.trace = true;
+      state.tracePath = state.tracePath ?? `${state.projectPath}/.pi/inbox/trace.log`;
+      ctx.ui.notify(`Trace ON (file + console echo): ${state.tracePath}`, "info");
+      changed = true;
+    } else if (arg === "quiet") {
+      state.consoleEcho = false;
+      ctx.ui.notify("Console echo OFF (file trace unchanged)", "info");
+      changed = true;
     } else if (arg === "status") {
       // Status is a read-only query - no state change, no need to persist.
       ctx.ui.notify(
-        `Trace: ${state.trace ? "ON" : "OFF"}\nPath: ${state.tracePath ?? "(default: .pi/inbox/trace.log)"}`,
+        `Trace: ${state.trace ? "ON" : "OFF"} (console: ${state.consoleEcho ? "ON" : "OFF"})\nPath: ${state.tracePath ?? "(default: .pi/inbox/trace.log)"}`,
         "info"
       );
     } else if (arg.startsWith("path ")) {
@@ -516,7 +529,7 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Trace path set: ${state.tracePath}`, "info");
       changed = true;
     } else {
-      ctx.ui.notify("Usage: /dual trace on|off|status|path <file>", "warning");
+      ctx.ui.notify("Usage: /dual trace on|off|echo|quiet|status|path <file>", "warning");
     }
     if (changed) await persistState();
   }
@@ -619,6 +632,18 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           // Live status - the widget displays the current action.
           updateWidget(ctx);
         },
+        onFinalReport: (report: string) => {
+          // Single end-of-loop summary. Persist to disk for the user
+          // to review, and surface a short notification pointing at it.
+          const reportPath = `${state.projectPath}/.pi/inbox/final-report.md`;
+          (async () => {
+            const fs = await import("node:fs/promises");
+            await fs.writeFile(reportPath, report, "utf-8").catch(() => {});
+          })();
+          // First ~400 chars fit in a notification without truncation.
+          const head = report.length > 400 ? report.slice(0, 400) + "..." : report;
+          ctx.ui.notify(`Dual mode complete. Full report: ${reportPath}\n\n${head}`, "info");
+        },
         onTermination: (reason) => {
           state.active = false;
           state.phase = "idle";
@@ -642,12 +667,20 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
 
     // Wire up tracing on the session manager. This enables the
     // per-event stream in sessions.ts (tool calls, message text, etc.)
-    // and the live status tracker that updates the widget.
+    // and the live status tracker that updates the widget. Console
+    // echo is opt-in via `/dual trace echo` so the host TUI does not
+    // get spammed with event lines.
     const sessionManager = getSessionManager();
     sessionManager.setVerbose(state.trace, state.tracePath ?? undefined);
+    sessionManager.setConsoleEcho(state.consoleEcho);
     sessionManager.setActionListener(() => updateWidget(ctx));
     if (state.trace) {
-      ctx.ui.notify(`Trace: ${state.tracePath}`, "info");
+      ctx.ui.notify(
+        state.consoleEcho
+          ? `Trace ON (file + console echo): ${state.tracePath}`
+          : `Trace ON (file only): ${state.tracePath}`,
+        "info",
+      );
     }
 
     orchestrator.setModels(state.thinkerModel, state.doerModel);

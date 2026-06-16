@@ -38,6 +38,13 @@ export interface LoopCallbacks {
    * string (e.g. "write .pi/inbox/plan.md", "thinking...").
    */
   onActionChange?: (action: { role: "thinker" | "doer"; text: string; startedAt: number } | null) => void;
+  /**
+   * Optional hook called exactly once when the loop ends, with a
+   * markdown summary of what happened. The host typically writes this
+   * to disk and shows a short notification pointing at the file.
+   * Skipped when undefined (e.g. unit tests).
+   */
+  onFinalReport?: (report: string) => void;
 }
 
 export class LoopOrchestrator {
@@ -47,6 +54,17 @@ export class LoopOrchestrator {
   private state: DualAgentState;
   private callbacks: LoopCallbacks;
   private terminated = false;
+
+  // One-time-checkpoint state. `approveAll` is set to true the first
+  // time the human picks "Approve all (run to completion)" — after that
+  // we skip `phaseCheckpoint()` for the rest of the loop and just
+  // report at the end. `planSnapshot` is the plan that was approved,
+  // used to build the final report. `perStepOutcomes` accumulates the
+  // outcome of each Doer execution so the final report can list what
+  // actually happened, not just the plan.
+  private approveAll = false;
+  private planSnapshot: Plan | null = null;
+  private perStepOutcomes: Array<{ step: string; status: "complete" | "partial" | "failed"; note?: string }> = [];
 
   constructor(
     pi: ExtensionAPI,
@@ -154,10 +172,21 @@ export class LoopOrchestrator {
 
     if (this.terminated) return;
 
-    // Phase: Human checkpoint
-    await this.phaseCheckpoint();
+    // Phase: Human checkpoint — only on the first iteration (or if the
+    // human hasn't pre-approved all remaining steps). After the initial
+    // approval, the loop runs the rest of the plan autonomously and
+    // emits a single final report when it ends.
+    if (!this.approveAll) {
+      await this.phaseCheckpoint();
+      if (this.terminated) return;
+    }
 
-    if (this.terminated) return;
+    // Snapshot the plan for the final report. The first time the loop
+    // reaches this point is the iteration that was approved, so the
+    // snapshot reflects what the human signed off on.
+    if (!this.planSnapshot) {
+      this.planSnapshot = await this.inbox.readPlan();
+    }
 
     // Phase: Doer executes
     await this.phaseDoer();
@@ -237,15 +266,17 @@ export class LoopOrchestrator {
     // miss: status bar shows ⏸, notification spells out the path, and
     // the select() below is a blocking popup.
     this.ctx.ui.notify(
-      `⏸ CHECKPOINT\n\nThe Thinker produced a plan. Review it before the Doer runs.\n\nPlan: .pi/inbox/plan.md\nSupport: docs/RESEARCH.md, docs/PRD.md, docs/TASKS.csv\n\nChoose: Approve (let Doer run) / Edit (modify the plan) / Stop.`,
+      `⏸ CHECKPOINT\n\nThe Thinker produced a plan. Review it before the Doer runs.\n\nPlan: .pi/inbox/plan.md\nSupport: docs/RESEARCH.md, docs/PRD.md, docs/TASKS.csv\n\nChoose: Approve this step / Approve all (run to completion) / Edit / Stop.`,
       "warning",
     );
 
-    // Loop until the user picks Approve or Stop. Edit goes back to the top
-    // of the loop so the user can review the modified plan again.
+    // Loop until the user picks Approve (this step or all) or Stop.
+    // Edit goes back to the top of the loop so the user can review the
+    // modified plan again.
     while (true) {
       const choice = await this.ctx.ui.select("⏸ CHECKPOINT - Review the plan", [
-        "Approve and Execute",
+        "Approve this step",
+        "Approve all (run to completion)",
         "Edit Plan",
         "Stop",
       ]);
@@ -255,7 +286,7 @@ export class LoopOrchestrator {
         return;
       }
 
-      if (choice === "Approve and Execute") {
+      if (choice === "Approve this step" || choice === "Approve all (run to completion)") {
         // Refresh the checkpoint file with the approve decision so audit
         // trail is preserved.
         const plan = await this.inbox.readPlan();
@@ -267,7 +298,13 @@ export class LoopOrchestrator {
             approvedAt: new Date().toISOString(),
           });
         }
-        this.callbacks.onTrace?.("system", "CHECKPOINT - approved, proceeding to Doer");
+        if (choice === "Approve all (run to completion)") {
+          this.approveAll = true;
+          this.callbacks.onTrace?.("system", "CHECKPOINT - approved ALL, running to completion");
+          this.ctx.ui.notify("Approved all. Running remaining steps without further prompts. Final report at the end.", "info");
+        } else {
+          this.callbacks.onTrace?.("system", "CHECKPOINT - approved, proceeding to Doer");
+        }
         return;
       }
 
@@ -342,7 +379,11 @@ export class LoopOrchestrator {
     const prompt = formatDoerTask(JSON.stringify(plan, null, 2));
     this.callbacks.onTrace?.("doer", `prompt sent (${prompt.length} chars) planStep=${plan.steps.length}`);
 
-    // Run Doer
+    // Run Doer. Record the outcome for the final report regardless of
+    // success/failure — the host should be able to see what the Doer
+    // actually did, not just whether the loop survived.
+    let resultStatus: "complete" | "partial" | "failed" = "failed";
+    let currentStep = plan.steps[0]?.description ?? "unknown";
     try {
       await sessionManager.runDoerPrompt(prompt);
 
@@ -350,6 +391,8 @@ export class LoopOrchestrator {
       const results = await this.inbox.readResults();
       if (results) {
         this.callbacks.onTrace?.("doer", `results read: status=${results.status} changes=${results.changes.length} blockers=${results.blockers.length}`);
+        resultStatus = results.status;
+        if (results.stepId) currentStep = results.stepId;
       } else {
         this.callbacks.onTrace?.("doer", "results read: <MISSING> - no results file at .pi/inbox/results.md");
       }
@@ -361,6 +404,7 @@ export class LoopOrchestrator {
       this.callbacks.onError?.(error as Error);
       throw error;
     } finally {
+      this.perStepOutcomes.push({ step: currentStep, status: resultStatus });
       // Dispose Doer session (ephemeral)
       await sessionManager.disposeDoer();
     }
@@ -416,7 +460,63 @@ Update .pi/inbox/plan.md with your review. Mark the completed step as [x] and th
     this.state.active = false;
     this.state.phase = "done";
     this.notifyPhaseChange();
+    // Fire the final report before the termination callback so the
+    // host can present the report to the user in the same notification
+    // as the termination reason. The report itself is no-op if no
+    // callback is registered (e.g. in unit tests).
+    this.emitFinalReport(reason);
     this.callbacks.onTermination?.(reason);
+  }
+
+  /**
+   * Build a markdown summary of what happened and hand it to the host
+   * via onFinalReport. Called exactly once, when the loop ends. The
+   * report is intended to be the only thing the human reads after
+   * hitting "Approve all", so it answers: what was planned, what ran,
+   * what was the cost.
+   */
+  private emitFinalReport(reason: TerminationReason): void {
+    if (!this.callbacks.onFinalReport) return;
+
+    const plan = this.planSnapshot;
+    const lines: string[] = [];
+    lines.push(`# Dual Agent — Final Report`);
+    lines.push("");
+    lines.push(`**Reason:** ${reason}`);
+    lines.push(`**Iterations:** ${this.state.iteration}`);
+    lines.push(`**Errors:** ${this.state.errorCount}`);
+    lines.push("");
+
+    if (plan) {
+      lines.push(`## Plan: ${plan.title}`);
+      lines.push("");
+      lines.push("**Steps approved:**");
+      for (const s of plan.steps) {
+        lines.push(`- ${s.description}`);
+      }
+      lines.push("");
+    }
+
+    if (this.perStepOutcomes.length) {
+      lines.push("## Step outcomes");
+      lines.push("");
+      const icon = (s: string) => s === "complete" ? "✓" : s === "partial" ? "⚠" : "✗";
+      for (const o of this.perStepOutcomes) {
+        lines.push(`- ${icon(o.status)} **${o.status}** — ${o.step}`);
+      }
+      lines.push("");
+    }
+
+    const stats = getSessionManager().getTokenStats();
+    const total = stats.thinker.cost + stats.doer.cost;
+    lines.push("## Cost");
+    lines.push("");
+    lines.push(`- Thinker: $${stats.thinker.cost.toFixed(4)} (${stats.thinker.turns} turns)`);
+    lines.push(`- Doer:    $${stats.doer.cost.toFixed(4)} (${stats.doer.turns} turns)`);
+    lines.push(`- **Total: $${total.toFixed(4)}**`);
+    lines.push("");
+
+    this.callbacks.onFinalReport(lines.join("\n"));
   }
 
   pause(): void {
