@@ -291,28 +291,22 @@ ${checkpoint.humanAnnotations || "<!-- Your edits here -->"}
   // ========================================
 
   async hasArtifacts(): Promise<{ research: boolean; prd: boolean; tasks: boolean }> {
-    try {
-      await readFile(join(this.artifactsPath(), FILES.ARTIFACTS.RESEARCH), "utf-8");
-      const research = true;
-    } catch {
-      const research = false;
-    }
-
-    try {
-      await readFile(join(this.artifactsPath(), FILES.ARTIFACTS.PRD), "utf-8");
-      const prd = true;
-    } catch {
-      const prd = false;
-    }
-
-    try {
-      await readFile(join(this.artifactsPath(), FILES.ARTIFACTS.TASKS), "utf-8");
-      const tasks = true;
-    } catch {
-      const tasks = false;
-    }
-
-    return { research, prd, tasks } as any;
+    // Helper: returns true on success, false on any read error.
+    // (Any error is treated as "missing" - this is a probe, not a validation.)
+    const exists = async (name: string): Promise<boolean> => {
+      try {
+        await readFile(join(this.artifactsPath(), name), "utf-8");
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const [research, prd, tasks] = await Promise.all([
+      exists(FILES.ARTIFACTS.RESEARCH),
+      exists(FILES.ARTIFACTS.PRD),
+      exists(FILES.ARTIFACTS.TASKS),
+    ]);
+    return { research, prd, tasks };
   }
 
   async clearInbox(): Promise<void> {

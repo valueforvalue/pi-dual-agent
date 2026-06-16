@@ -34,6 +34,8 @@ interface ExtensionState {
   errorCount: number;
   taskDescription: string;
   projectPath: string;
+  trace: boolean;
+  tracePath: string | null;
 }
 
 let state: ExtensionState = {
@@ -46,6 +48,8 @@ let state: ExtensionState = {
   errorCount: 0,
   taskDescription: "",
   projectPath: "",
+  trace: false,
+  tracePath: null,
 };
 
 // ========================================
@@ -259,7 +263,7 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   pi.registerCommand("dual", {
     description: "Dual agent: setup, start, pause, resume, stop, status",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "models", "thinker", "doer", "start", "pause", "resume", "skip", "restart", "stop", "status"];
+      const subs = ["setup", "models", "thinker", "doer", "trace", "start", "pause", "resume", "skip", "restart", "stop", "status"];
       return subs.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     handler: async (args, ctx) => {
@@ -301,6 +305,10 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           } else {
             showModels(ctx);
           }
+          break;
+
+        case "trace":
+          handleTrace(rest, ctx);
           break;
 
         case "start":
@@ -362,8 +370,10 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    // Track token usage from main session
-    if (event.message && "usage" in event.message) {
+    // Track token usage from main session. event is AgentEndEvent
+    // which has `messages: AgentMessage[]` (not a single `message`).
+    const lastAssistant = [...(event.messages ?? [])].reverse().find((m: any) => m?.role === "assistant");
+    if (lastAssistant && (lastAssistant as any).usage) {
       updateWidget(ctx);
     }
   });
@@ -384,6 +394,28 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
       `Thinker: ${state.thinkerModel?.provider}/${state.thinkerModel?.id || "not set"}\nDoer: ${state.doerModel?.provider}/${state.doerModel?.id || "not set"}`,
       "info"
     );
+  }
+
+  function handleTrace(rest: string, ctx: ExtensionContext): void {
+    const arg = rest.trim();
+    if (arg === "on" || arg === "") {
+      state.trace = true;
+      state.tracePath = state.tracePath ?? `${state.projectPath}/.pi/inbox/trace.log`;
+      ctx.ui.notify(`Trace ON: ${state.tracePath}`, "info");
+    } else if (arg === "off") {
+      state.trace = false;
+      ctx.ui.notify("Trace OFF", "info");
+    } else if (arg === "status") {
+      ctx.ui.notify(
+        `Trace: ${state.trace ? "ON" : "OFF"}\nPath: ${state.tracePath ?? "(default: .pi/inbox/trace.log)"}`,
+        "info"
+      );
+    } else if (arg.startsWith("path ")) {
+      state.tracePath = arg.slice(5).trim();
+      ctx.ui.notify(`Trace path set: ${state.tracePath}`, "info");
+    } else {
+      ctx.ui.notify("Usage: /dual trace on|off|status|path <file>", "warning");
+    }
   }
 
   function showFullStatus(ctx: ExtensionContext): void {
@@ -457,12 +489,19 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
         onCostUpdate: () => {
           updateWidget(ctx);
         },
+        onTrace: (role, message) => {
+          // One-line-per-phase trace, visible in console even without
+          // the per-event trace from sessions.ts. Useful as a smoke test:
+          // if you see these lines, the orchestrator actually reached
+          // each phase.
+          console.log(`[pi-dual-agent:phase] [${role}] ${message}`);
+        },
         onTermination: (reason) => {
           state.active = false;
           state.phase = "idle";
           updateStatusBar(ctx);
           ctx.ui.setWidget("pi-dual-agent", []);
-          
+
           const reasonMessages: Record<string, string> = {
             human_stop: "Stopped by user",
             thinker_done: "Thinker declared complete",
@@ -477,6 +516,14 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
         },
       }
     );
+
+    // Wire up tracing on the session manager. This enables the
+    // per-event stream in sessions.ts (tool calls, message text, etc.).
+    const sessionManager = getSessionManager();
+    sessionManager.setVerbose(state.trace, state.tracePath ?? undefined);
+    if (state.trace) {
+      ctx.ui.notify(`Trace: ${state.tracePath}`, "info");
+    }
 
     orchestrator.setModels(state.thinkerModel, state.doerModel);
     orchestrator.setMode(state.mode);

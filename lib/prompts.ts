@@ -12,7 +12,11 @@ import type { DualMode } from "./types";
 
 /**
  * Thinker system prompt - Simple mode
- * Next-step focus: identify only the immediate next action
+ * Next-step focus: identify only the immediate next action.
+ *
+ * The system prompt is concatenated into the user turn (the pi SDK's
+ * createAgentSession has no system-prompt option on this codepath), so it
+ * is phrased as instructions to the model rather than a role preamble.
  */
 export const THINKER_SIMPLE_SYSTEM = `You are the THINKER agent in a dual-agent workflow.
 
@@ -20,25 +24,42 @@ Your role: Deep reasoning, planning, and analysis.
 
 CURRENT MODE: SIMPLE (next-step focus)
 
-Your task:
-1. Analyze the user's request
-2. Identify ONLY the immediate next action
-3. Explain your reasoning
-4. Describe the expected outcome
+CRITICAL OUTPUT REQUIREMENT:
+You MUST save your plan as a markdown file using the write tool. Specifically:
+- Call the write tool with path ".pi/inbox/plan.md"
+- The content must follow the EXACT format below
 
-Output format:
-- State the next step clearly
-- Explain WHY this is the right first step
-- Describe what success looks like
-- Note any dependencies or blockers
+PLAN FILE FORMAT (required):
+\`\`\`
+# Plan: <short task name>
 
-IMPORTANT:
-- Do NOT plan multiple steps ahead
-- Wait for human approval before execution
-- If you need clarification, ask the user
-- Keep responses focused and concise
+## Context
+<1-3 sentences of context about the task>
 
-After the Doer completes a step, you will review the results and identify the next action.
+## Steps
+1. [ ] <first step - the one the Doer should execute now>
+2. [ ] <subsequent steps - optional, for visibility>
+
+## Dependencies
+(none)
+
+## Notes
+<!-- Human annotations here -->
+
+---
+*Mode: simple | Thinker: <your model id>*
+\`\`\`
+
+Status markers MUST be one of: [ ] (pending), [>] (in_progress), [x] (complete).
+
+You MAY use the read, bash, grep, find, ls tools to explore the codebase first.
+You MUST NOT use the edit tool (that's the Doer's job).
+You MUST use the write tool to save the plan to .pi/inbox/plan.md.
+Do NOT just describe the plan in your chat response - WRITE IT TO THE FILE.
+
+If you need clarification from the user, ask in your chat response WITHOUT writing the plan file. The orchestrator will detect the missing plan and pause.
+
+After the Doer completes a step, you will be asked to review results and identify the next action.
 `;
 
 /**
@@ -59,6 +80,7 @@ Your task follows the to-prd -> to-issues -> TASKS.csv workflow:
    - Identify constraints and requirements
    - Use the project's domain glossary vocabulary
    - Respect ADRs in the area you're touching
+   - Save findings to docs/RESEARCH.md using the write tool
 
 2. CREATE PRD (docs/PRD.md)
    - Problem statement
@@ -67,12 +89,14 @@ Your task follows the to-prd -> to-issues -> TASKS.csv workflow:
    - Implementation decisions
    - Testing decisions
    - Out of scope
+   - Save with the write tool
 
 3. BREAK INTO ISSUES (docs/TASKS.csv)
    - Create vertical slices (tracer bullets)
    - Each slice cuts through ALL layers end-to-end
    - Mark as HITL (needs human) or AFK (automated)
    - Dependencies between slices
+   - Save with the write tool
 
 4. EXECUTE & REVIEW
    - Execute one task at a time
@@ -80,16 +104,39 @@ Your task follows the to-prd -> to-issues -> TASKS.csv workflow:
    - Refine the plan based on what you learn
    - Update task status in TASKS.csv
 
+CRITICAL OUTPUT REQUIREMENT:
+You MUST save a plan to .pi/inbox/plan.md using the write tool. The format:
+\`\`\`
+# Plan: <short task name>
+
+## Context
+<1-3 sentences>
+
+## Steps
+1. [ ] <first slice to execute>
+2. [ ] <second slice>
+...
+
+## Dependencies
+- Step N depends on Step M
+
+## Notes
+<!-- Human annotations here -->
+
+---
+*Mode: complex | Thinker: <your model id>*
+\`\`\`
+
+Status markers: [ ] pending, [>] in_progress, [x] complete.
+
+You MAY use read, bash, grep, find, ls for exploration.
+You MUST NOT use the edit tool.
+You MUST use the write tool to save all artifacts (.pi/inbox/plan.md, docs/RESEARCH.md, docs/PRD.md, docs/TASKS.csv).
+
 Output conventions:
 - Plans go in .pi/inbox/plan.md
 - Results from Doer go in .pi/inbox/results.md
 - Artifacts go in docs/ (RESEARCH.md, PRD.md, TASKS.csv)
-
-IMPORTANT:
-- Use domain vocabulary from the project
-- Prefer vertical slices over horizontal
-- Mark HITL decisions clearly
-- Keep artifacts up to date
 `;
 
 /**
@@ -215,15 +262,17 @@ export function formatThinkerTask(task: string, mode: DualMode): string {
     ? "Using COMPLEX mode: Follow the to-prd -> to-issues -> TASKS.csv workflow."
     : "Using SIMPLE mode: Identify only the next step.";
 
+  const system = mode === "complex" ? THINKER_COMPLEX_SYSTEM : THINKER_SIMPLE_SYSTEM;
+
   return `${modeContext}
 
-USER REQUEST:
+=== USER REQUEST ===
 ${task}
+=== END USER REQUEST ===
 
-${mode === "complex" ? THINKER_COMPLEX_SYSTEM : THINKER_SIMPLE_SYSTEM}
+${system}
 
-Begin your analysis and planning.
-`;
+REMINDER: Your first action should be to use the write tool to save your plan to .pi/inbox/plan.md. The Doer cannot proceed without it.`;
 }
 
 export function formatDoerTask(plan: string): string {

@@ -25,6 +25,13 @@ export interface LoopCallbacks {
   onCostUpdate?: (thinkerCost: number, doerCost: number) => void;
   onTermination?: (reason: TerminationReason) => void;
   onError?: (error: Error) => void;
+  /**
+   * Optional hook for high-level lifecycle events. Distinct from
+   * SessionManagerClass's per-event trace: this is one line per phase
+   * (prompt sent / plan read / results read) so users can see what
+   * happened even when the verbose per-event trace is off.
+   */
+  onTrace?: (role: "thinker" | "doer" | "review" | "system", message: string) => void;
 }
 
 export class LoopOrchestrator {
@@ -175,6 +182,7 @@ export class LoopOrchestrator {
 
     // Build prompt
     const prompt = formatThinkerTask(this.state.taskDescription, this.state.mode);
+    this.callbacks.onTrace?.("thinker", `prompt sent (${prompt.length} chars) mode=${this.state.mode}`);
 
     // Run Thinker
     try {
@@ -182,15 +190,30 @@ export class LoopOrchestrator {
 
       // Read generated plan
       const plan = await this.inbox.readPlan();
-      if (plan) {
-        // Write checkpoint for human review
-        await this.inbox.writeCheckpoint({
-          plan,
-          humanAnnotations: "",
-          decision: "approve",
-          approvedAt: new Date().toISOString(),
-        });
+      this.callbacks.onTrace?.("thinker", plan
+        ? `plan read: ${plan.steps.length} step(s), mode=${plan.mode}`
+        : "plan read: <MISSING> - no plan file at .pi/inbox/plan.md");
+
+      if (!plan || plan.steps.length === 0) {
+        // Fail loudly. Previously this was silently swallowed and the
+        // loop proceeded to a checkpoint with an empty plan.
+        this.state.errorCount++;
+        const tracePath = sessionManager.getTraceFilePath();
+        const hint = tracePath
+          ? `See trace: ${tracePath}`
+          : "Re-run with /dual trace on to see what the Thinker did.";
+        const msg = `Thinker did not produce a usable plan. ${hint}`;
+        this.callbacks.onError?.(new Error(msg));
+        throw new Error(msg);
       }
+
+      // Write checkpoint for human review
+      await this.inbox.writeCheckpoint({
+        plan,
+        humanAnnotations: "",
+        decision: "approve",
+        approvedAt: new Date().toISOString(),
+      });
     } catch (error) {
       this.state.errorCount++;
       this.callbacks.onError?.(error as Error);
@@ -265,6 +288,7 @@ export class LoopOrchestrator {
 
     // Build Doer prompt
     const prompt = formatDoerTask(JSON.stringify(plan, null, 2));
+    this.callbacks.onTrace?.("doer", `prompt sent (${prompt.length} chars) planStep=${plan.steps.length}`);
 
     // Run Doer
     try {
@@ -272,6 +296,11 @@ export class LoopOrchestrator {
 
       // Read results
       const results = await this.inbox.readResults();
+      if (results) {
+        this.callbacks.onTrace?.("doer", `results read: status=${results.status} changes=${results.changes.length} blockers=${results.blockers.length}`);
+      } else {
+        this.callbacks.onTrace?.("doer", "results read: <MISSING> - no results file at .pi/inbox/results.md");
+      }
       if (results?.status === "failed") {
         this.state.errorCount++;
       }
@@ -293,6 +322,7 @@ export class LoopOrchestrator {
 
     // Read results
     const results = await this.inbox.readResults();
+    this.callbacks.onTrace?.("review", `reviewing doer results status=${results?.status ?? "<missing>"}`);
 
     // Ask Thinker to review
     const reviewPrompt = `Review the Doer's results and determine next steps.
@@ -306,7 +336,7 @@ Check:
 3. What's the next action?
 4. Should we continue or declare done?
 
-Update .pi/inbox/plan.md with your review.
+Update .pi/inbox/plan.md with your review. Mark the completed step as [x] and the next one as [>]. If all steps are complete, mark them all as [x].
 `;
 
     try {
@@ -314,8 +344,14 @@ Update .pi/inbox/plan.md with your review.
 
       // Check if Thinker says done
       const plan = await this.inbox.readPlan();
-      if (plan?.steps.every(s => s.status === "complete")) {
-        this.terminate("thinker_done");
+      if (plan) {
+        const completed = plan.steps.filter(s => s.status === "complete").length;
+        this.callbacks.onTrace?.("review", `plan updated: ${completed}/${plan.steps.length} complete`);
+        if (plan.steps.every(s => s.status === "complete")) {
+          this.terminate("thinker_done");
+        }
+      } else {
+        this.callbacks.onTrace?.("review", "review done but plan.md is missing or unparseable");
       }
     } catch (error) {
       this.state.errorCount++;
