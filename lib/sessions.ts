@@ -30,7 +30,7 @@ const DOER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 // Paths the Thinker is allowed to write to. Resolved against cwd at hook
 // installation time. Anything else is blocked.
-const THINKER_WRITE_ALLOWLIST = [".pi/inbox", "docs"];
+const THINKER_WRITE_ALLOWLIST = [".pi/inbox"];
 
 // Maximum chars of assistant text to dump to the trace per turn.
 // Long outputs (e.g. file dumps) get truncated to keep traces readable.
@@ -85,7 +85,7 @@ function makeThinkerToolGuard(cwd: string) {
         block: true,
         reason:
           `Thinker cannot write to "${rawPath}". ` +
-          `Allowed paths: ${relAllowed}/ (plans, PRDs, docs). ` +
+          `Allowed paths: ${relAllowed}/ (plans and inbox artifacts). ` +
           `Code files (*.html, *.js, *.ts, *.css, etc.) must be written by the Doer ` +
           `at the execution phase, after the human has approved the plan at the checkpoint.`,
       };
