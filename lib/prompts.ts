@@ -1,18 +1,17 @@
 /**
- * pi-dual-agent - Agent Prompts
+ * pi-dual-agent - Router Preamble
  *
- * The router (lib/router.ts) builds prompts for sub-sessions using
- * the router preamble. The old THINKER/DOER prompts (with their
- * embedded pipeline and plan.md format) are gone; the slash skills
- * own the pipeline now.
+ * The router (lib/router.ts) sends a preamble to each sub-session so
+ * the sub-session's model knows which model class it's playing, which
+ * specific model is active, and what slash command the user invoked.
  *
- * Legacy functions formatThinkerTask / formatDoerTask are kept for
- * the old orchestrator loop in lib/loop.ts, which will be removed
- * in a follow-up commit. They delegate to the router preamble so
- * the prompt content has a single source of truth.
+ * The router preamble is the only prompt this extension produces. The
+ * old THINKER/DOER system prompts (with their embedded pipelines and
+ * plan.md formats) and the file-relay checkpoint notifications are
+ * gone - the slash skills own the pipeline, and the file relay no
+ * longer exists.
  */
 
-import type { DualMode } from "./types";
 import type { DualRole } from "./router-parser";
 
 /**
@@ -47,79 +46,4 @@ export function buildRouterPreamble(
     ``,
     args || "(no args)",
   ].join("\n");
-}
-
-/**
- * Legacy checkpoint notification. Still used by the old
- * orchestrator loop (lib/loop.ts) which will be removed in a
- * follow-up commit.
- */
-export const CHECKPOINT_NOTIFICATION = `# Human Checkpoint
-
-The Thinker has prepared a plan for your review.
-
-Review the plan in .pi/inbox/plan.md
-
-Options:
-1. [ ] Approve - Execute as planned
-2. [ ] Modify - Edit the plan with your changes
-3. [ ] Stop - End the workflow
-
-After making your decision, the workflow will continue based on your choice.
-`;
-
-/**
- * Legacy loop-complete notification. Same status as above.
- */
-export const LOOP_COMPLETE = `# Dual Agent Complete
-
-The workflow has finished.
-
-Final status:
-- Iterations: {count}
-- Total cost: <calculated at runtime>
-
-Results summary available in .pi/inbox/results.md
-`;
-
-/**
- * Look up the model id string for a role from the persisted config
- * shape. Used by the legacy format functions. The router reads the
- * model directly from state, not through this helper.
- */
-function resolveModelId(
-  mode: DualMode,
-  thinkerModel: { provider: string; id: string } | null,
-  doerModel: { provider: string; id: string } | null,
-): string {
-  // The old simple/complex mode distinction is gone; the role
-  // determines the model. We default to the Thinker model for the
-  // legacy function signature, which used to be called for both.
-  const m = thinkerModel ?? doerModel;
-  return m ? `${m.provider}/${m.id}` : "(unset)";
-}
-
-/**
- * Legacy: format the prompt for a Thinker run. Now delegates to
- * the router preamble. Kept for the old orchestrator loop.
- *
- * @deprecated Use the router (lib/router.ts) directly.
- */
-export function formatThinkerTask(
-  task: string,
-  mode: DualMode,
-  options?: { thinkerModel?: { provider: string; id: string } | null },
-): string {
-  const modelId = resolveModelId(mode, options?.thinkerModel ?? null, null);
-  return buildRouterPreamble("thinker", modelId, "/grill-with-docs", task);
-}
-
-/**
- * Legacy: format the prompt for a Doer run. Now delegates to the
- * router preamble. Kept for the old orchestrator loop.
- *
- * @deprecated Use the router (lib/router.ts) directly.
- */
-export function formatDoerTask(plan: string): string {
-  return buildRouterPreamble("doer", "(unset)", "/implement", plan);
 }

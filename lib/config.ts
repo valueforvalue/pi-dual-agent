@@ -27,7 +27,6 @@ import {
   CONFIG_SCHEMA_VERSION,
   type PersistedConfig,
   type TraceConfig,
-  type DualMode,
   type ModelRef,
 } from "./types";
 
@@ -111,8 +110,6 @@ function sanitizeConfig(obj: Record<string, unknown>): PersistedConfig {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     thinkerModel: sanitizeModelRef(obj.thinkerModel),
     doerModel: sanitizeModelRef(obj.doerModel),
-    defaultMode: sanitizeMode(obj.defaultMode),
-    maxIterations: sanitizeMaxIterations(obj.maxIterations),
     trace: sanitizeTrace(obj.trace),
     updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : "",
   };
@@ -128,17 +125,6 @@ function sanitizeModelRef(value: unknown): ModelRef | null {
     name: typeof m.name === "string" ? m.name : undefined,
     reasoning: typeof m.reasoning === "boolean" ? m.reasoning : undefined,
   };
-}
-
-function sanitizeMode(value: unknown): DualMode {
-  return value === "complex" ? "complex" : "simple";
-}
-
-function sanitizeMaxIterations(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
-    return DEFAULT_CONFIG.maxIterations;
-  }
-  return Math.floor(value);
 }
 
 function sanitizeTrace(value: unknown): TraceConfig {

@@ -20,10 +20,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
-import type { DualAgentState, TokenStats, DualMode, ModelRef, PersistedConfig } from "./lib/types";
+import type { ModelRef, PersistedConfig } from "./lib/types";
 import { getSessionManager, resetSessionManager } from "./lib/sessions";
-import { createOrchestrator, destroyOrchestrator, getOrchestrator } from "./lib/loop";
-import { createInboxManager } from "./lib/inbox";
 import { loadConfig, saveConfig, getConfigPath } from "./lib/config";
 import { parseDualRouterCommand, runDualCommand, isSubSessionActive, clearActiveSubSession } from "./lib/router";
 
@@ -32,14 +30,8 @@ import { parseDualRouterCommand, runDualCommand, isSubSessionActive, clearActive
 // ========================================
 
 interface ExtensionState {
-  active: boolean;
-  mode: DualMode;
   thinkerModel: ModelRef | null;
   doerModel: ModelRef | null;
-  iteration: number;
-  phase: string;
-  errorCount: number;
-  taskDescription: string;
   projectPath: string;
   trace: boolean;
   consoleEcho: boolean;
@@ -47,14 +39,8 @@ interface ExtensionState {
 }
 
 let state: ExtensionState = {
-  active: false,
-  mode: "simple",
   thinkerModel: null,
   doerModel: null,
-  iteration: 0,
-  phase: "idle",
-  errorCount: 0,
-  taskDescription: "",
   projectPath: "",
   trace: false,
   consoleEcho: false,
@@ -76,11 +62,9 @@ let configLoaded = false;
 
 function buildPersistedConfig(): PersistedConfig {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     thinkerModel: state.thinkerModel,
     doerModel: state.doerModel,
-    defaultMode: state.mode,
-    maxIterations: 50,
     trace: {
       enabled: state.trace,
       path: state.tracePath,
@@ -102,7 +86,6 @@ async function loadState(_ctx: ExtensionContext): Promise<void> {
   // taskDescription) — those always start fresh.
   if (config.thinkerModel) state.thinkerModel = config.thinkerModel;
   if (config.doerModel) state.doerModel = config.doerModel;
-  state.mode = config.defaultMode;
   state.trace = config.trace.enabled;
   // `consoleEcho` is accepted on read so a config from a future build
   // that adds the field still loads, but this build's sanitizer
@@ -115,73 +98,6 @@ async function loadState(_ctx: ExtensionContext): Promise<void> {
 // UI Updates
 // ========================================
 
-function getPhaseIcon(phase: string): string {
-  const icons: Record<string, string> = {
-    idle: "○",
-    thinking: "🤔",
-    checkpoint: "⏸",
-    doing: "⚡",
-    reviewing: "🔍",
-    done: "✓",
-  };
-  return icons[phase] || "?";
-}
-
-function updateStatusBar(ctx: ExtensionContext): void {
-  // Persistent checkpoint status - visible until the user resolves the
-  // checkpoint, not just a transient notification.
-  if (state.phase === "checkpoint") {
-    const status = `⏸ CHECKPOINT — review .pi/inbox/plan.md (Approve/Edit/Stop)`;
-    ctx.ui.setStatus("pi-dual-agent", ctx.ui.theme.fg("warning", status));
-    return;
-  }
-  const icon = getPhaseIcon(state.phase);
-  const status = `${icon} Dual:${state.mode} iter:${state.iteration}`;
-  ctx.ui.setStatus("pi-dual-agent", ctx.ui.theme.fg("accent", status));
-}
-
-function formatDuration(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m${s % 60}s`;
-}
-
-function updateWidget(ctx: ExtensionContext): void {
-  if (!state.active && state.phase === "idle") {
-    ctx.ui.setWidget("pi-dual-agent", []);
-    return;
-  }
-
-  const stats = getSessionManager().getTokenStats();
-  const sessionManager = getSessionManager();
-  const action = sessionManager.getCurrentAction();
-  const activeRole = state.phase === "thinking" || state.phase === "reviewing"
-    ? "thinker"
-    : state.phase === "doing" ? "doer" : null;
-
-  // Compose the "Current:" line. If we have a live action that matches
-  // the active role, show it with elapsed time. Otherwise show "(idle)".
-  let currentLine = `Current: (idle)`;
-  if (action && action.role === activeRole) {
-    const elapsed = formatDuration(Date.now() - action.startedAt);
-    currentLine = `Current: [${action.role}] ${action.text} (${elapsed})`;
-  } else if (activeRole && state.phase !== "checkpoint") {
-    currentLine = `Current: [${activeRole}] (preparing...)`;
-  } else if (state.phase === "checkpoint") {
-    currentLine = `Current: ⏸ awaiting human decision`;
-  }
-
-  const lines = [
-    `Thinker: ${activeRole === "thinker" ? "Active" : "Idle"} ${state.thinkerModel?.id || ""}`,
-    `Doer: ${activeRole === "doer" ? "Active" : "Idle"} ${state.doerModel?.id || ""}`,
-    `Mode: ${state.mode} | Phase: ${state.phase} | Iteration: ${state.iteration}`,
-    currentLine,
-    `Thinker: $${stats.thinker.cost.toFixed(4)} | Doer: $${stats.doer.cost.toFixed(4)}`,
-    `Total: $${(stats.thinker.cost + stats.doer.cost).toFixed(4)}`,
-  ];
-  ctx.ui.setWidget("pi-dual-agent", lines, { placement: "belowEditor" });
-}
 
 // ========================================
 // Model Selection
@@ -424,32 +340,12 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           showConfig(ctx);
           break;
 
-        case "start":
-          await handleStart(ctx, rest);
-          break;
-
-        case "pause":
-          handlePause(ctx);
-          break;
-
-        case "resume":
-          handleResume(ctx);
-          break;
-
-        case "skip":
-          handleSkip(ctx);
-          break;
-
-        case "restart":
-          await handleRestart(ctx);
-          break;
-
         case "stop":
           if (isSubSessionActive()) {
             clearActiveSubSession();
             ctx.ui.notify("Stopped active sub-session", "info");
           } else {
-            await handleStop(ctx);
+            ctx.ui.notify("No active sub-session to stop", "info");
           }
           break;
 
@@ -470,8 +366,15 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("dual-stop", {
-    description: "Stop dual mode",
-    handler: async (_args, ctx) => handleStop(ctx),
+    description: "Stop the active sub-session",
+    handler: async (_args, ctx) => {
+      if (isSubSessionActive()) {
+        clearActiveSubSession();
+        ctx.ui.notify("Stopped active sub-session", "info");
+      } else {
+        ctx.ui.notify("No active sub-session to stop", "info");
+      }
+    },
   });
 
   // ========================================
@@ -481,18 +384,11 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     state.projectPath = ctx.cwd;
     await loadState(ctx);
-    updateStatusBar(ctx);
-    if (state.active) {
-      updateWidget(ctx);
-    }
-  });
-
-  pi.on("agent_end", async (event, ctx) => {
-    // Track token usage from main session. event is AgentEndEvent
-    // which has `messages: AgentMessage[]` (not a single `message`).
-    const lastAssistant = [...(event.messages ?? [])].reverse().find((m: any) => m?.role === "assistant");
-    if (lastAssistant && (lastAssistant as any).usage) {
-      updateWidget(ctx);
+    // The router owns the status bar and widget while a sub-session
+    // is active. When idle, leave them empty.
+    if (!isSubSessionActive()) {
+      ctx.ui.setStatus("pi-dual-agent", "");
+      ctx.ui.setWidget("pi-dual-agent", []);
     }
   });
 
@@ -501,9 +397,15 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
   // ========================================
 
   async function showStatus(ctx: ExtensionContext): Promise<void> {
+    const t = state.thinkerModel
+      ? `${state.thinkerModel.provider}/${state.thinkerModel.id}`
+      : "(not set)";
+    const d = state.doerModel
+      ? `${state.doerModel.provider}/${state.doerModel.id}`
+      : "(not set)";
     ctx.ui.notify(
-      `pi-dual-agent\nMode: ${state.mode}\nThinker: ${state.thinkerModel?.provider}/${state.thinkerModel?.id || "not set"}\nDoer: ${state.doerModel?.provider}/${state.doerModel?.id || "not set"}\nPhase: ${state.phase}\nIteration: ${state.iteration}`,
-      "info"
+      `pi-dual-agent\nThinker: ${t}\nDoer: ${d}\n\nUse /dual <skill> [args] to run a slash command with model routing.`,
+      "info",
     );
   }
 
@@ -528,7 +430,6 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
       `Persisted config: ${getConfigPath()}\n\n` +
         `Thinker: ${thinker}\n` +
         `Doer:    ${doer}\n` +
-        `Default mode: ${state.mode}\n` +
         `Trace: ${state.trace ? "ON" : "OFF"}\n` +
         `Trace path: ${tracePath}\n\n` +
         (configLoaded
@@ -578,231 +479,10 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
 
   function showFullStatus(ctx: ExtensionContext): void {
     const stats = getSessionManager().getTokenStats();
+    const sub = isSubSessionActive() ? "Yes (router sub-session)" : "No";
     ctx.ui.notify(
-      `Active: ${state.active}\nMode: ${state.mode}\nPhase: ${state.phase}\nIteration: ${state.iteration}\nErrors: ${state.errorCount}\n\nThinker: ${state.thinkerModel?.provider}/${state.thinkerModel?.id || "—"}\nDoer: ${state.doerModel?.provider}/${state.doerModel?.id || "—"}\n\nCosts:\nThinker: $${stats.thinker.cost.toFixed(4)}\nDoer: $${stats.doer.cost.toFixed(4)}\nTotal: $${(stats.thinker.cost + stats.doer.cost).toFixed(4)}`,
+      `Sub-session active: ${sub}\n\nThinker: ${state.thinkerModel?.provider}/${state.thinkerModel?.id || "—"}\nDoer: ${state.doerModel?.provider}/${state.doerModel?.id || "—"}\n\nCosts:\nThinker: $${stats.thinker.cost.toFixed(4)}\nDoer: $${stats.doer.cost.toFixed(4)}\nTotal: $${(stats.thinker.cost + stats.doer.cost).toFixed(4)}`,
       "info"
     );
   }
-
-  async function handleStart(ctx: ExtensionContext, task: string): Promise<void> {
-    if (!state.thinkerModel || !state.doerModel) {
-      ctx.ui.notify("Models not set. Run /dual setup first.", "error");
-      return;
-    }
-
-    if (!task.trim()) {
-      ctx.ui.notify("No task specified. Usage: /dual start <task description>", "error");
-      return;
-    }
-
-    // Parse mode from flags. Track whether the user EXPLICITLY set it
-    // with a flag — we persist that as the new default, but we do NOT
-    // persist the auto-detected mode below, since that's per-run
-    // behaviour, not a user preference.
-    let mode: DualMode = state.mode;
-    let userSetMode = false;
-    if (task.includes("--complex")) {
-      mode = "complex";
-      task = task.replace(/--complex/g, "").trim();
-      userSetMode = true;
-    } else if (task.includes("--simple")) {
-      mode = "simple";
-      task = task.replace(/--simple/g, "").trim();
-      userSetMode = true;
-    }
-
-    // Check for existing artifacts to auto-detect mode
-    if (mode === "simple") {
-      const inbox = createInboxManager(ctx.cwd);
-      const artifacts = await inbox.hasArtifacts();
-      if (artifacts.research || artifacts.prd || artifacts.tasks) {
-        mode = "complex";
-        ctx.ui.notify("Auto-detected complex mode from existing artifacts", "info");
-      }
-    }
-
-    state.active = true;
-    state.mode = mode;
-    state.taskDescription = task;
-    state.iteration = 1;
-    state.phase = "thinking";
-    state.errorCount = 0;
-
-    updateStatusBar(ctx);
-    updateWidget(ctx);
-    // Only update the persisted default if the user asked for it.
-    // Auto-detected mode is a property of the current run, not a
-    // preference, so we don't want to leak it into the saved default.
-    if (userSetMode) {
-      await persistState();
-    } else {
-      // Still write the file so any in-flight model/trace changes
-      // are captured. We pass through the current defaultMode, which
-      // equals the value loaded from disk at session_start.
-      await saveConfig(buildPersistedConfig());
-    }
-
-    ctx.ui.notify(`Started dual mode (${mode}): ${task}`, "info");
-
-    // Start the loop in background
-    const orchestrator = createOrchestrator(
-      pi,
-      ctx,
-      ctx.cwd,
-      {
-        onPhaseChange: (phase) => {
-          state.phase = phase;
-          updateStatusBar(ctx);
-          updateWidget(ctx);
-        },
-        onIterationChange: (iter) => {
-          state.iteration = iter;
-          updateStatusBar(ctx);
-          updateWidget(ctx);
-        },
-        onCostUpdate: () => {
-          updateWidget(ctx);
-        },
-        onTrace: (role, message) => {
-          // One-line-per-phase trace. We deliberately do NOT write this
-          // to stdout via console.log — that bypasses the TUI's render
-          // region and paints orphan text over the screen ("UI clobber").
-          //
-          // The full per-event stream still goes to the trace file
-          // (sessions.ts) when /dual trace on is set, so nothing is
-          // lost. This callback is a no-op for now; if a future
-          // iteration needs a live "what just happened" line, the right
-          // place for it is the widget (setWidget) or status bar
-          // (setStatus), not stdout.
-        },
-        onActionChange: (action) => {
-          // Live status - the widget displays the current action.
-          updateWidget(ctx);
-        },
-        onFinalReport: (report: string) => {
-          // Single end-of-loop summary. Persist to disk for the user
-          // to review, and surface a short notification pointing at it.
-          const reportPath = `${state.projectPath}/.pi/inbox/final-report.md`;
-          (async () => {
-            const fs = await import("node:fs/promises");
-            await fs.writeFile(reportPath, report, "utf-8").catch(() => {});
-          })();
-          // First ~400 chars fit in a notification without truncation.
-          const head = report.length > 400 ? report.slice(0, 400) + "..." : report;
-          ctx.ui.notify(`Dual mode complete. Full report: ${reportPath}\n\n${head}`, "info");
-        },
-        onTermination: (reason) => {
-          state.active = false;
-          state.phase = "idle";
-          updateStatusBar(ctx);
-          ctx.ui.setWidget("pi-dual-agent", []);
-
-          const reasonMessages: Record<string, string> = {
-            human_stop: "Stopped by user",
-            thinker_done: "Thinker declared complete",
-            max_iterations: "Max iterations reached",
-            error_threshold: "Too many errors",
-          };
-          ctx.ui.notify(`Dual mode ended: ${reasonMessages[reason] || reason}`, "info");
-        },
-        onError: (error) => {
-          state.errorCount++;
-          ctx.ui.notify(`Error: ${error.message}`, "error");
-        },
-      }
-    );
-
-    // Wire up tracing on the session manager. This enables the
-    // per-event stream in sessions.ts (tool calls, message text, etc.)
-    // and the live status tracker that updates the widget. Console
-    // echo is opt-in via `/dual trace echo` so the host TUI does not
-    // get spammed with event lines.
-    const sessionManager = getSessionManager();
-    sessionManager.setVerbose(state.trace, state.tracePath ?? undefined);
-    sessionManager.setConsoleEcho(state.consoleEcho);
-    sessionManager.setActionListener(() => updateWidget(ctx));
-    if (state.trace) {
-      ctx.ui.notify(
-        state.consoleEcho
-          ? `Trace ON (file + console echo): ${state.tracePath}`
-          : `Trace ON (file only): ${state.tracePath}`,
-        "info",
-      );
-    }
-
-    orchestrator.setModels(state.thinkerModel, state.doerModel);
-    orchestrator.setMode(state.mode);
-    orchestrator.setTask(state.taskDescription);
-
-    // Start loop asynchronously
-    orchestrator.start().catch((error) => {
-      ctx.ui.notify(`Loop error: ${error.message}`, "error");
-      state.active = false;
-      state.phase = "idle";
-      updateStatusBar(ctx);
-    });
-  }
-
-  function handlePause(ctx: ExtensionContext): void {
-    const orchestrator = getOrchestrator();
-    if (orchestrator) {
-      orchestrator.pause();
-      ctx.ui.notify("Paused at checkpoint", "info");
-    } else {
-      ctx.ui.notify("No active session to pause", "warning");
-    }
-  }
-
-  function handleResume(ctx: ExtensionContext): void {
-    const orchestrator = getOrchestrator();
-    if (orchestrator) {
-      orchestrator.resume();
-      ctx.ui.notify("Resumed", "info");
-    } else {
-      ctx.ui.notify("No session to resume", "warning");
-    }
-  }
-
-  function handleSkip(ctx: ExtensionContext): void {
-    ctx.ui.notify("Skip not yet implemented - use /dual stop to end", "info");
-  }
-
-  async function handleRestart(ctx: ExtensionContext): Promise<void> {
-    await handleStop(ctx);
-    ctx.ui.notify("Reset complete. Run /dual start to begin again.", "info");
-  }
-
-  async function handleStop(ctx: ExtensionContext): Promise<void> {
-    const orchestrator = getOrchestrator();
-    if (orchestrator) {
-      await orchestrator.stop();
-      destroyOrchestrator();
-    }
-    resetSessionManager();
-
-    state.active = false;
-    state.phase = "idle";
-    state.iteration = 0;
-    state.errorCount = 0;
-
-    updateStatusBar(ctx);
-    ctx.ui.setWidget("pi-dual-agent", []);
-    ctx.ui.notify("Stopped dual mode", "info");
-    await persistState();
-  }
-
-  // ========================================
-  // Initialize
-  // ========================================
-
-  pi.registerFlag("dual-complex", {
-    description: "Start dual mode in complex mode",
-    type: "boolean",
-    default: false,
-  });
-
-  // Intentionally no console.log here. The TUI uses an alternate
-  // screen buffer, and stdout writes from extension load code persist
-  // as orphan lines on screen. /dual status (or the widget) is how the
-  // user discovers the extension.
-}
+} // end of dualAgentExtension
