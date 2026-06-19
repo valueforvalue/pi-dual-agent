@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ModelRef } from "./types";
 import { getSessionManager } from "./sessions";
+import { buildRouterPreamble } from "./prompts";
 import type { DualRole, DualCommand } from "./router-parser";
 
 // Re-export the parser for callers that already import from
@@ -64,8 +65,8 @@ let activeSub: SubSessionState | null = null;
 
 /**
  * Build the router preamble that goes at the top of the sub-session's
- * prompt. Tells the sub-session's model what role it's playing and
- * what the user asked for.
+ * prompt. Delegates to prompts.ts:buildRouterPreamble so the prompt
+ * content has a single source of truth.
  */
 function buildSubSessionPrompt(
   role: DualRole,
@@ -73,20 +74,7 @@ function buildSubSessionPrompt(
   slash: string,
   args: string,
 ): string {
-  return [
-    `[Router context]`,
-    `You are running in a dual-agent sub-session.`,
-    `Model class: ${role}`,
-    `Model: ${model}`,
-    `Cost is being tracked against the ${role} bucket.`,
-    ``,
-    `The user invoked: ${slash}`,
-    `Run the slash command with the args provided below. Treat this as if the user had typed the slash command directly into a fresh session.`,
-    ``,
-    `---`,
-    ``,
-    args || "(no args)",
-  ].join("\n");
+  return buildRouterPreamble(role, model, slash, args);
 }
 
 /**
