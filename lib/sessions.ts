@@ -273,6 +273,15 @@ export class SessionManagerClass {
     this.initialized = true;
   }
 
+  /**
+   * Public alias for ensureInitialized. The router (and any other
+   * caller that needs the model registry ready before using findModel)
+   * calls this instead of reaching into a private method.
+   */
+  async ensureReady(): Promise<void> {
+    await this.ensureInitialized();
+  }
+
   private emptyTokenStats(): TokenStats {
     return {
       inputTokens: 0,
@@ -629,6 +638,24 @@ export class SessionManagerClass {
       thinker: { ...this.tokenStats.thinker },
       doer: { ...this.tokenStats.doer },
     };
+  }
+
+  /**
+   * Accumulate cost and token usage from an external run (typically a
+   * router sub-session) into the appropriate model bucket. Lets the
+   * router contribute to the same per-model totals that the persistent
+   * Thinker/Doer sessions do, without going through the event handler
+   * on a non-SessionManager session.
+   */
+  recordRunCost(
+    role: "thinker" | "doer",
+    run: { inputTokens: number; outputTokens: number; cost: number; turns: number },
+  ): void {
+    const stats = this.tokenStats[role];
+    stats.inputTokens += run.inputTokens || 0;
+    stats.outputTokens += run.outputTokens || 0;
+    stats.cost += run.cost || 0;
+    stats.turns += run.turns || 0;
   }
 
   async runThinkerPrompt(prompt: string): Promise<void> {

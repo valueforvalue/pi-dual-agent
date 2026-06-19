@@ -25,6 +25,7 @@ import { getSessionManager, resetSessionManager } from "./lib/sessions";
 import { createOrchestrator, destroyOrchestrator, getOrchestrator } from "./lib/loop";
 import { createInboxManager } from "./lib/inbox";
 import { loadConfig, saveConfig, getConfigPath } from "./lib/config";
+import { parseDualRouterCommand, runDualCommand, isSubSessionActive, clearActiveSubSession } from "./lib/router";
 
 // ========================================
 // State
@@ -338,14 +339,45 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
 
   // Main dual command
   pi.registerCommand("dual", {
-    description: "Dual agent: setup, start, pause, resume, stop, status",
+    description: "Dual agent: setup, models, slash-skill router, status",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "models", "thinker", "doer", "trace", "config", "start", "pause", "resume", "skip", "restart", "stop", "status"];
+      const subs = [
+        // Legacy commands
+        "setup", "models", "thinker", "doer", "trace", "config", "status",
+        // Router short names
+        "grill", "me", "prd", "issues", "triage", "arch", "handoff",
+        "implement", "prototype",
+        // Router explicit verbs
+        "think", "code",
+      ];
       return subs.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     handler: async (args, ctx) => {
       if (!args || typeof args !== "string") {
         showStatus(ctx);
+        return;
+      }
+
+      // Try the new slash-skill router first. If the args match a
+      // known skill (short name or /<slash>), or the explicit verb
+      // forms `think` / `code`, dispatch to the router. Anything
+      // not recognised by the router falls through to the legacy
+      // command parser below.
+      try {
+        const routed = parseDualRouterCommand(args);
+        if (routed) {
+          await runDualCommand(ctx, routed, {
+            thinkerModel: state.thinkerModel,
+            doerModel: state.doerModel,
+          });
+          return;
+        }
+      } catch (err) {
+        // parseDualRouterCommand throws on unknown skills with a
+        // helpful list. Surface that and bail out - the legacy
+        // parser would just say "Unknown action" which is less
+        // helpful for a typo'd skill name.
+        ctx.ui.notify((err as Error).message, "error");
         return;
       }
 
@@ -413,7 +445,12 @@ export default function dualAgentExtension(pi: ExtensionAPI): void {
           break;
 
         case "stop":
-          await handleStop(ctx);
+          if (isSubSessionActive()) {
+            clearActiveSubSession();
+            ctx.ui.notify("Stopped active sub-session", "info");
+          } else {
+            await handleStop(ctx);
+          }
           break;
 
         case "status":

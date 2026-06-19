@@ -36,8 +36,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --strict --esModuleInterop --skipLibCheck index.ts lib/config.ts lib/types.ts lib/loop.ts lib/sessions.ts lib/inbox.ts lib/prompts.ts",
-    "test": "node test/tool-guard.test.mjs",
+    "typecheck": "tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --strict --esModuleInterop --skipLibCheck index.ts lib/config.ts lib/types.ts lib/loop.ts lib/sessions.ts lib/inbox.ts lib/prompts.ts lib/router.ts lib/router-parser.ts",
+    "test": "node test/tool-guard.test.mjs && node test/router-parser.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "sync": "scripts/sync-to-install.sh",
     "sync:win": "scripts/sync-to-install.bat"
