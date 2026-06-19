@@ -7,7 +7,7 @@
 import { resolve, isAbsolute } from "node:path";
 import { strict as assert } from "node:assert";
 
-const THINKER_WRITE_ALLOWLIST = [".pi/inbox", "docs"];
+const THINKER_WRITE_ALLOWLIST = [".pi/inbox"];
 
 function makeThinkerToolGuard(cwd) {
   const allowedAbs = THINKER_WRITE_ALLOWLIST.map((d) => resolve(cwd, d));
@@ -41,15 +41,15 @@ const cases = [
   ["non-write tool allowed", { toolCall: { name: "read" }, args: { path: "x" } }, false],
   ["write to plan.md allowed", { toolCall: { name: "write" }, args: { path: ".pi/inbox/plan.md" } }, false],
   ["write to checkpoint.md allowed", { toolCall: { name: "write" }, args: { path: ".pi/inbox/checkpoint.md" } }, false],
-  ["write to docs/PRD.md allowed", { toolCall: { name: "write" }, args: { path: "docs/PRD.md" } }, false],
-  ["write to docs/RESEARCH.md allowed", { toolCall: { name: "write" }, args: { path: "docs/RESEARCH.md" } }, false],
-  ["write to docs/TASKS.csv allowed", { toolCall: { name: "write" }, args: { path: "docs/TASKS.csv" } }, false],
   ["write to index.html BLOCKED", { toolCall: { name: "write" }, args: { path: "index.html" } }, true, "index.html"],
   ["write to src/main.ts BLOCKED", { toolCall: { name: "write" }, args: { path: "src/main.ts" } }, true, "src/main.ts"],
   ["write to style.css BLOCKED", { toolCall: { name: "write" }, args: { path: "style.css" } }, true, "style.css"],
   ["write to .pi/inbox/../index.html BLOCKED (path traversal)", { toolCall: { name: "write" }, args: { path: ".pi/inbox/../index.html" } }, true, "index.html"],
   ["write to /tmp/foo BLOCKED (absolute path outside)", { toolCall: { name: "write" }, args: { path: "/tmp/foo" } }, true, "/tmp/foo"],
   ["write to .pi/inboxery/secret.md BLOCKED (prefix attack)", { toolCall: { name: "write" }, args: { path: ".pi/inboxery/secret.md" } }, true, ".pi/inboxery"],
+  ["write to docs/PRD.md BLOCKED (allowlist removed)", { toolCall: { name: "write" }, args: { path: "docs/PRD.md" } }, true, "docs/PRD.md"],
+  ["write to docs/RESEARCH.md BLOCKED (allowlist removed)", { toolCall: { name: "write" }, args: { path: "docs/RESEARCH.md" } }, true, "docs/RESEARCH.md"],
+  ["write to docs/TASKS.csv BLOCKED (allowlist removed)", { toolCall: { name: "write" }, args: { path: "docs/TASKS.csv" } }, true, "docs/TASKS.csv"],
   ["write with file_path field also handled", { toolCall: { name: "write" }, args: { file_path: "index.html" } }, true, "index.html"],
   ["write with no path - allows (let tool validate)", { toolCall: { name: "write" }, args: {} }, false],
 ];
