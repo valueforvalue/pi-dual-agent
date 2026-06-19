@@ -1,17 +1,15 @@
 # pi-dual-agent
 
-Dual-agent system for pi with Thinker + Doer roles and human checkpoints.
+Model router for pi that splits the mattpocock slash-skill pipeline across two configured models, keeping cost down by reserving an expensive model for reasoning work and a cheap model for execution.
 
 ## Overview
 
-This extension implements a dual-agent workflow for complex software engineering tasks:
+- **Thinker**: Reasoning-focused model that runs the interview-and-spec skills (`/grill-with-docs`, `/to-prd`, `/to-issues`, `/triage`, `/handoff`)
+- **Doer**: Execution-focused model that runs the implement skill (`/implement`, `/prototype`)
+- **Cost split**: per-model token and cost tracking, so you can see exactly what the reasoning work costs vs the execution work
+- **Backward compat**: the older in-repo file relay (`.pi/inbox/plan.md` + `results.md` with a human checkpoint between Thinker and Doer) is still supported for users who prefer the dual-agent loop with an explicit gate
 
-- **Thinker**: Reasoning-focused model that analyzes, plans, and reviews
-- **Doer**: Execution-focused model that implements plans
-- **Human Checkpoint**: Human reviews Thinker's output before Doer executes
-- **File Relay**: Markdown inbox for agent-to-agent communication
-
-The system runs in iterative loops until the task is complete, the human stops it, or failures exceed a threshold.
+The extension does not own the pipeline - the slash skills do. It owns the model routing and the per-skill cost tracking. Invoke any of the mattpocock skills normally; dual-agent swaps the model to the configured Thinker or Doer based on the skill class, and the right cost bucket is incremented.
 
 ## Requirements
 
@@ -117,17 +115,23 @@ Thinker identifies only the immediate next action. Human approves or modifies. R
 - Small changes
 - Single-file edits
 
-### Complex Mode (Full Pipeline)
+### Complex Mode (Slash-Skill Pipeline)
 
-Thinker follows the to-prd → to-issues → TASKS.csv workflow.
+The Thinker drives the mattpocock slash-skill pipeline:
+
+1. `/grill-with-docs` (or `/grill-me` if no codebase) - interview the user
+2. `/to-prd` - publish a PRD to the configured issue tracker
+3. `/to-issues` - break the PRD into tracer-bullet vertical slices
 
 **Thinker behavior:**
-- Creates docs/RESEARCH.md
-- Creates docs/PRD.md
-- Breaks into vertical slices
-- Creates docs/TASKS.csv
+- Routes `/grill-with-docs`, `/to-prd`, `/to-issues` to the configured Thinker model
 - Reviews Doer results
-- Refines as needed
+- Refines the plan as needed
+
+**Doer behavior:**
+- Routes `/implement` to the configured Doer (Coder) model
+- Per-issue fresh session, /tdd-driven
+- Commits to the current branch when green
 
 **Use for:**
 - New features
@@ -137,14 +141,12 @@ Thinker follows the to-prd → to-issues → TASKS.csv workflow.
 
 ### Mode Detection
 
-**Auto-detect (default):**
-- `docs/RESEARCH.md` or `docs/PRD.md` exists → Complex
-- Request contains keywords: "architecture", "refactor", "system", "migrate" → Complex
+**Auto-detect (default):** Simple mode unless `--complex` is passed.
 
 **User override:**
 ```bash
-/dual start <task> --complex  # Force complex mode
-/dual start <task> --simple   # Force simple mode
+/dual start <task> --complex  # Force complex mode (slash-skill pipeline)
+/dual start <task> --simple   # Force simple mode (one-step plan)
 ```
 
 ## Architecture
@@ -191,15 +193,14 @@ Files live at `./project/.pi/inbox/`:
 
 | File | Purpose |
 |------|---------|
-| `plan.md` | Thinker's current plan |
-| `results.md` | Doer's execution results |
-| `checkpoint.md` | Human review checkpoint |
+| `plan.md` | Thinker's current plan (optional, for in-repo file relay) |
+| `results.md` | Doer's execution results (optional, for in-repo file relay) |
+| `checkpoint.md` | Human review checkpoint (optional) |
 | `diff.md` | Code changes (optional) |
 
-Artifacts for complex mode:
-- `docs/RESEARCH.md`
-- `docs/PRD.md`
-- `docs/TASKS.csv`
+The slash-skill pipeline produces its own artifacts on the configured
+issue tracker (GitHub/GitLab/local `.scratch/`). The in-repo file
+relay is the older dual-agent style; both paths are supported.
 
 ### Plan Format
 
