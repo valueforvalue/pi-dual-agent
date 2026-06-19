@@ -63,16 +63,17 @@ Loop terminates when:
 - Waits for human approval
 - Use for: quick fixes, small changes, single-file edits
 
-**Complex Mode (Full Pipeline):**
-- Thinker follows to-prd -> to-issues -> TASKS.csv workflow
-- Creates docs/RESEARCH.md, docs/PRD.md, docs/TASKS.csv
-- Breaks into vertical slices
+**Complex Mode (Slash-Skill Pipeline):**
+- Thinker drives the mattpocock slash skills: /grill-with-docs -> /to-prd -> /to-issues
+- PRDs and issues publish to the configured issue tracker (GitHub/GitLab/local)
+- Breaks into tracer-bullet vertical slices
 - Reviews Doer results, refines as needed
 - Use for: new features, system refactors, architecture changes
 
 **Mode Detection:**
-- Auto-detect: docs/RESEARCH.md or docs/PRD.md exists -> Complex
+- Default: simple mode
 - User override: --complex or --simple flag on /dual start
+- Future: tracker-based auto-detect (ready-for-agent issues -> complex)
 
 ### Commands
 
