@@ -1,15 +1,20 @@
 /**
  * pi-dual-agent
- * 
- * Dual-agent system with Thinker + Doer roles:
- * - Thinker: Reasoning-focused, plans and reviews
- * - Doer: Execution-focused, implements plans
- * - Human Checkpoint: Reviews between Thinker and Doer
- * - File Relay: Markdown inbox for communication
- * 
- * Modes:
- * - Simple: Next-step focus
- * - Complex: Full to-prd/to-issues workflow
+ *
+ * Model router for the mattpocock slash-skill pipeline. Splits a task
+ * across two configured models to keep cost down:
+ * - Thinker: Reasoning-focused. Routes /grill-with-docs, /to-prd,
+ *   /to-issues, /triage, /handoff to a capable-but-expensive model.
+ * - Doer: Execution-focused. Routes /implement, /prototype to a
+ *   fast/cheap execution model.
+ *
+ * Sessions are managed per-skill-class so cost is tracked on the
+ * right bucket. The two models are configured via /dual setup.
+ *
+ * Backward-compat: the older in-repo file relay (.pi/inbox/plan.md +
+ * results.md) still works for users who prefer an explicit checkpoint
+ * between Thinker and Doer runs. New flows should use the slash skills
+ * directly.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
