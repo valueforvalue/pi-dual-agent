@@ -4,12 +4,16 @@ Model router for pi that splits the mattpocock slash-skill pipeline across two c
 
 ## Overview
 
-- **Thinker**: Reasoning-focused model that runs the interview-and-spec skills (`/grill-with-docs`, `/to-prd`, `/to-issues`, `/triage`, `/handoff`)
-- **Doer**: Execution-focused model that runs the implement skill (`/implement`, `/prototype`)
-- **Cost split**: per-model token and cost tracking, so you can see exactly what the reasoning work costs vs the execution work
-- **Backward compat**: the older in-repo file relay (`.pi/inbox/plan.md` + `results.md` with a human checkpoint between Thinker and Doer) is still supported for users who prefer the dual-agent loop with an explicit gate
+- **Thinker**: Reasoning-focused model. Routes `/grill-with-docs`, `/grill-me`, `/to-prd`, `/to-issues`, `/triage`, `/handoff` to a capable-but-expensive model.
+- **Doer**: Execution-focused model. Routes `/implement`, `/prototype` to a fast/cheap execution model.
+- **Cost split**: per-model token and cost tracking, so you can see exactly what the reasoning work costs vs the execution work.
+- **TUI feedback during a run**: status bar shows the active model, widget shows live state (tokens, cost, current action), main chat gets a throttled caveman-style progress stream.
 
 The extension does not own the pipeline - the slash skills do. It owns the model routing and the per-skill cost tracking. Invoke any of the mattpocock skills normally; dual-agent swaps the model to the configured Thinker or Doer based on the skill class, and the right cost bucket is incremented.
+
+## Why
+
+A single model must balance deep reasoning with efficient execution. These are competing priorities: reasoning-focused models are slower and more expensive; execution-focused models may miss edge cases or produce suboptimal plans. The dual-agent pattern splits the work: an expensive model handles the reasoning skills (`/grill-with-docs`, `/to-prd`, `/to-issues`), a cheap model handles the execution skills (`/implement`). The slash skills already do the work - dual-agent just makes sure the right model runs each one.
 
 ## Requirements
 
@@ -21,10 +25,7 @@ The extension does not own the pipeline - the slash skills do. It owns the model
 ### Option 1: Clone and Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/pi-dual-agent.git
-
-# Install via pi
+git clone https://github.com/valueforvalue/pi-dual-agent.git
 cd pi-dual-agent
 pi install .
 ```
@@ -32,285 +33,202 @@ pi install .
 ### Option 2: Manual Installation
 
 ```bash
-# Copy to pi extensions directory
 cp -r /path/to/pi-dual-agent ~/.pi/agent/extensions/pi-dual-agent
-
-# Reload pi to load the extension
+# In pi:
 /reload
 ```
 
-### Option 3: npm Package
+### Option 3: npm
 
 ```bash
-# Install from npm (when published)
-npm install pi-dual-agent
-
-# Or install from git
-npm install github:YOUR_USERNAME/pi-dual-agent
+pi install git:github.com:valueforvalue/pi-dual-agent
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Setup - pick your models
+# 1. Pick your models
 /dual setup
 
-# 2. Start a task (simple mode)
-/dual start Fix the login bug
+# 2. Run a slash skill - the right model is picked automatically
+/dual grill my goal            # Thinker model
+/dual implement #42            # Doer model
+/dual triage                   # Thinker model
 
-# 3. Review the plan, then approve/modify/stop
-# The Thinker creates a plan, you review it
-
-# 4. Doer executes approved steps
-# Loop continues until done or you stop
+# 3. Or use the explicit form to override the routing
+/dual think /grill-with-docs my goal   # force Thinker
+/dual code /implement #42              # force Doer
 ```
+
+Each invocation is one ephemeral sub-session. No persistent state between calls. The slash skills do the actual work; dual-agent just routes the model.
 
 ## Commands
 
-### Setup Commands
+### Setup
 
 ```bash
-/dual setup          # Interactively pick Thinker & Doer models
-/dual models         # Show current model assignments
-/dual thinker <id>   # Set Thinker model (e.g., anthropic/claude-opus-4-5)
-/dual doer <id>      # Set Doer model (e.g., anthropic/claude-sonnet-4-5)
-/dual config         # Show the persisted config (path + values)
+/dual setup                  # Interactively pick Thinker + Doer models
+/dual models                 # Show current model assignments
+/dual thinker <provider/id>  # Set Thinker model (e.g. anthropic/claude-opus-4-5)
+/dual doer <provider/id>     # Set Doer model (e.g. anthropic/claude-sonnet-4-5)
+/dual config                 # Show the persisted config (path + values)
+/dual status                 # Per-model cost + active sub-session info
+/dual trace on|off|path <f>  # Toggle verbose tracing
 ```
 
-### Control Commands
+### Slash-Skill Router
 
 ```bash
-/dual start <task>           # Start with current settings
-/dual start <task> --complex  # Force complex mode
-/dual start <task> --simple   # Force simple mode
-/dual pause                   # Pause at checkpoint
-/dual resume                  # Resume after pause
-/dual skip                    # Skip current step
-/dual restart                 # Restart current phase
-/dual stop                    # Stop everything
-/dual status                  # Full state display
+# Smart-routing by skill class
+/dual grill [args]            # -> /grill-with-docs on Thinker
+/dual me [args]               # -> /grill-me on Thinker
+/dual prd [args]              # -> /to-prd on Thinker
+/dual issues [args]           # -> /to-issues on Thinker
+/dual triage [args]           # -> /triage on Thinker
+/dual arch [args]             # -> /improve-codebase-architecture on Thinker
+/dual handoff [args]          # -> /handoff on Thinker
+/dual implement [args]        # -> /implement on Doer
+/dual prototype [args]        # -> /prototype on Doer
+
+# Full slash command name also works
+/dual grill-with-docs [args]  # same as /dual grill
+/dual /implement [args]      # same as /dual implement
+
+# Explicit override (verb form, avoids model-setter collision)
+/dual think <prompt>          # run any prompt on the Thinker model
+/dual code <prompt>           # run any prompt on the Doer model
+```
+
+### Control
+
+```bash
+/dual stop                    # Cancel the active sub-session (if any)
 ```
 
 ### Shortcuts
 
 ```bash
-/dual-setup   # Quick setup
-/dual-stop    # Quick stop
+/dual-setup                   # Quick setup (alias for /dual setup)
+/dual-stop                    # Quick stop (alias for /dual stop)
 ```
 
-## Modes
+## How Routing Works
 
-### Simple Mode (Next-Step Focus)
+Each `/dual <skill> [args]` invocation:
 
-Thinker identifies only the immediate next action. Human approves or modifies. Repeat.
+1. Parses the args (smart-route by skill class, or explicit form)
+2. Looks up the configured model for the role (Thinker or Doer)
+3. Creates a new ephemeral `AgentSession` with that model
+4. Sends the prompt + slash command + args to the sub-session
+5. Captures events from the sub-session: status bar, widget, progress stream
+6. Prints the slash skill's output to the main chat as a normal assistant message
+7. Disposes the sub-session and accumulates cost against the right model bucket
 
-**Thinker behavior:**
-- Identifies next action
-- Explains reasoning
-- Describes expected outcome
-- Waits for approval
+The sub-session is fresh per invocation. Conversation history is not carried over. If you want to chain work across invocations, use the slash skills' own state (e.g. `/handoff` for OS-temp handoffs, or the issue tracker for cross-session work).
 
-**Use for:**
-- Quick fixes
-- Small changes
-- Single-file edits
+## TUI Feedback
 
-### Complex Mode (Slash-Skill Pipeline)
+During a sub-session run:
 
-The Thinker drives the mattpocock slash-skill pipeline:
-
-1. `/grill-with-docs` (or `/grill-me` if no codebase) - interview the user
-2. `/to-prd` - publish a PRD to the configured issue tracker
-3. `/to-issues` - break the PRD into tracer-bullet vertical slices
-
-**Thinker behavior:**
-- Routes `/grill-with-docs`, `/to-prd`, `/to-issues` to the configured Thinker model
-- Reviews Doer results
-- Refines the plan as needed
-
-**Doer behavior:**
-- Routes `/implement` to the configured Doer (Coder) model
-- Per-issue fresh session, /tdd-driven
-- Commits to the current branch when green
-
-**Use for:**
-- New features
-- System refactors
-- Architecture changes
-- Multi-file changes
-
-### Mode Detection
-
-**Auto-detect (default):** Simple mode unless `--complex` is passed.
-
-**User override:**
-```bash
-/dual start <task> --complex  # Force complex mode (slash-skill pipeline)
-/dual start <task> --simple   # Force simple mode (one-step plan)
+**Status bar:**
 ```
+⏵ Dual: Thinker active — anthropic/claude-opus-4-5 · /grill-with-docs (12s)
+```
+
+**Widget (below editor):**
+```
+┌─ Sub-session ─────────────────────┐
+│ Model:    anthropic/claude-opus-4-5 │
+│ Class:    thinker                  │
+│ Skill:    /grill-with-docs         │
+│ Turns:    3                        │
+│ Tokens:   1.2k                     │
+│ Cost:     $0.0123                  │
+│ Action:   read CONTEXT.md          │
+└────────────────────────────────────┘
+```
+
+**Main chat progress (caveman-style, throttled):**
+```
+[dual:thinker] /grill-with-docs
+[dual:thinker] read CONTEXT.md
+[dual:thinker] ask Q1: clarify goal
+[dual:thinker] done — 4 turns, 1.2k tokens, $0.012
+```
+
+**Result:** the slash skill's final output appears as a normal assistant message in the main chat.
+
+The throttling caps the progress stream at ~10 messages per sub-session run, even on long sessions. Bursts of tool calls (a long read-grep-read sequence) get collapsed to one message per 3 seconds.
 
 ## Architecture
 
 ```
-User Request
-     │
-     ▼
-┌─────────────┐
-│   Thinker   │ ◄──────────────┐
-│   (Plan)    │                │
-└──────┬──────┘                │
-       │                       │
-       ▼                       │
-┌─────────────┐               │
-│   Human     │               │
-│   Review    │               │
-└──────┬──────┘               │
-       │                       │
-       ▼                       │
-┌─────────────┐               │
-│    Doer     │               │
-│  (Execute)  │               │
-└──────┬──────┘               │
-       │                       │
-       ▼                       │
-┌─────────────┐───────────────┘
-│   Thinker   │
-│   (Review)  │
-└─────────────┘
-
-Loop until: Human "stop", Thinker "done", or 3 failures
+User invokes /dual <skill> [args]
+        │
+        ▼
+┌──────────────────────┐
+│ Router (index.ts)    │   parses, looks up model class
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Sub-session factory  │   creates ephemeral AgentSession
+│ (lib/router.ts)      │   with Thinker or Doer model
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Sub-session          │   runs the slash skill
+│ (single turn)        │   emits events
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Result + cost        │   cost accumulated against role bucket
+│                      │   result printed to main chat
+└──────────────────────┘
 ```
 
-### Session Architecture
-
-- **Thinker Session**: Persistent across iterations, maintains context
-- **Doer Session**: Created fresh per iteration, ephemeral
-- **Communication**: File relay via project-local inbox
-
-## Inbox
-
-Files live at `./project/.pi/inbox/`:
-
-| File | Purpose |
-|------|---------|
-| `plan.md` | Thinker's current plan (optional, for in-repo file relay) |
-| `results.md` | Doer's execution results (optional, for in-repo file relay) |
-| `checkpoint.md` | Human review checkpoint (optional) |
-| `diff.md` | Code changes (optional) |
-
-The slash-skill pipeline produces its own artifacts on the configured
-issue tracker (GitHub/GitLab/local `.scratch/`). The in-repo file
-relay is the older dual-agent style; both paths are supported.
-
-### Plan Format
-
-```markdown
-# Plan: <Task Name>
-
-## Context
-<User request and Thinker analysis>
-
-## Steps
-1. [x] Completed step
-2. [>] Current step
-3. [ ] Pending step
-
-## Dependencies
-- Step 2 depends on Step 1
-
-## Notes
-<!-- Human annotations here -->
-```
-
-### Results Format
-
-```markdown
-# Results: <Step>
-
-## Status: ✓ Complete
-
-## Changes Made
-- Added auth middleware
-- Created user model
-
-## Diffs
-\`\`\`diff
-+ const auth = ...
-\`\`\`
-
-## Blockers
-(none)
-
-## Next
-Proceed to step 3
-```
-
-## Token & Cost Tracking
-
-The extension tracks token usage and costs for both agents:
-
-**Display:**
-- Status bar: Current phase and iteration
-- Widget: Per-agent costs and totals
-- Notifications: Cost updates at key events
-
-**Example widget:**
-```
-Thinker: Active anthropic/claude-opus-4-5
-Doer: Idle anthropic/claude-sonnet-4-5
-Mode: simple | Phase: thinking | Iteration: 1
-Thinker: $0.0234 | Doer: $0.0000
-Total: $0.0234
-```
+There is no persistent session. No loop. No checkpoint. Each `/dual` invocation is one round trip.
 
 ## Model Selection
 
-### Recommended Models
+### Recommended Pairings
 
-**Thinker (Reasoning-focused):**
-- `anthropic/claude-opus-4-5` - Best reasoning, slower
-- `anthropic/claude-sonnet-4-5` - Good balance
-- `openai/o3-mini` - Fast reasoning
+**Thinker (reasoning-focused):**
+- `anthropic/claude-opus-4-5` - best reasoning, slowest, most expensive
+- `anthropic/claude-sonnet-4-5` - good balance
+- `openai/o3-mini` - fast reasoning
+- `google/gemini-2.5-pro` - capable reasoning
 
-**Doer (Execution-focused):**
-- `anthropic/claude-sonnet-4-5` - Good tool use
-- `openai/gpt-4o` - Fast execution
-- `google/gemini-2.0-flash` - Very fast
+**Doer (execution-focused):**
+- `anthropic/claude-sonnet-4-5` - reliable tool use
+- `openai/gpt-4o` - fast execution
+- `google/gemini-2.0-flash` - very fast
 
-### How Model Selection Works
+The skill classes map to the default routing in `lib/router-parser.ts`:
+- **Thinker** (reasoning, planning, specs): `grill`, `me`, `prd`, `issues`, `triage`, `arch`, `handoff`, plus the full slash names
+- **Doer** (execution, implementation): `implement`, `prototype`
 
-1. Run `/dual setup` for interactive picker
-2. Extension queries `modelRegistry.getAvailable()`
-3. You select from your logged-in providers
-4. Config saved to `~/.pi/agent/config/pi-dual-agent.json`
+To override on a per-call basis, use the verb forms: `/dual think <prompt>` or `/dual code <prompt>`.
 
 ## Persistence
 
 | Data | Location |
 |------|----------|
 | Model config | `~/.pi/agent/config/pi-dual-agent.json` |
-| Sessions | `~/.pi/agent/sessions/pi-dual-agent/` |
-| Cost history | `~/.pi/agent/stats/pi-dual-agent/` |
+| Per-model cost totals | in-memory (reset on session restart) |
+| Slash-skill artifacts | the configured issue tracker (not in this extension) |
 
-### What is persisted
+The config file holds only user preferences (model selection, trace settings). It does NOT hold session state, iteration counts, or in-flight task descriptions - there are no sessions to resume in the router model.
 
-User **preferences** survive across pi sessions:
+### When the config is read and written
 
-- Thinker and Doer model selection
-- Default mode (`simple` or `complex`)
-- Trace settings (enabled, output path)
-
-Transient loop state (active phase, current iteration, in-flight task description) is **not** persisted — when you close pi, the running loop dies with it. The next session starts fresh, but your model selection is already loaded.
-
-### When it is read and written
-
-- **Read once** at `session_start` — the saved models and defaults are restored into the in-memory state.
+- **Read once** at `session_start` - the saved models and trace settings are restored.
 - **Written** every time a preference changes:
   - `/dual setup` (interactive picker)
   - `/dual thinker <provider/id>` and `/dual doer <provider/id>`
-  - `/dual start <task> --complex` / `--simple` (only when the user passes the flag — auto-detected mode from existing artifacts is not persisted as the new default)
-  - `/dual trace on|off|path <file>` (the `status` subcommand is read-only)
-  - `/dual stop`
+  - `/dual trace on|off|path <file>`
 
 ### Inspecting the saved config
 
@@ -318,92 +236,59 @@ Transient loop state (active phase, current iteration, in-flight task descriptio
 /dual config
 ```
 
-prints the current persisted values and the absolute path of the file, so you can `cat` / edit / back it up. (The path differs per OS — Windows uses `%USERPROFILE%\.pi\agent\config\pi-dual-agent.json`, macOS/Linux use `~/.pi/agent/config/pi-dual-agent.json`.)
+prints the current values and the absolute path of the file. If the file is missing, unreadable, contains invalid JSON, or was written by a newer schema version, the defaults are used and a warning is logged. The extension never fails to load because of a config problem.
 
-If the file is missing, unreadable, contains invalid JSON, or was written by a newer version of the extension, the defaults are used and a warning is logged to the console. The extension never fails to load because of a config problem.
+## Cost Tracking
 
-## Error Handling
+The router accumulates token and cost totals per model bucket. The router reads `usage` from the sub-session's `message_end` events and adds to the appropriate bucket via `ModelRegistryWrapper.recordRunCost()`.
 
-### Doer Errors
-- Parse error → Report to Thinker, ask for revised approach
-- Tool blocked → Retry once, then escalate
-- 3 retries failed → Mark step failed, move to next or stop
+`/dual status` shows:
+- Whether a sub-session is currently active
+- Per-model cost (thinker and doer)
+- Total cost
 
-### Thinker Errors
-- Unclear request → Ask human for clarification
-- Loop detection → Notify human, suggest manual intervention
+The totals are in-memory; they reset when pi restarts. Per-session cost history is not persisted (the slash skills' own history is on the configured issue tracker).
 
-### Session Errors
-- Invalid API key → Notify human, pause until resolved
-- Network error → Retry with backoff, then pause
+## TUI Sibling Compatibility
 
-## Loop Termination
-
-Loop ends when:
-- Human says `/dual stop`
-- Thinker declares "done" (all steps complete)
-- 3 consecutive failures (error_threshold)
-- Max iterations reached (default: 50)
-
-## Configuration
-
-### Flags
-
-```bash
-# Start in complex mode by default
-pi --dual-complex
-```
-
-### Environment Variables
-
-The extension uses pi's model registry. Ensure your API keys are configured:
-
-```bash
-# In ~/.pi/agent/auth.json or environment
-ANTHROPIC_API_KEY=sk-...
-OPENAI_API_KEY=sk-...
-```
+Dual-agent uses the named slot `pi-dual-agent` for its status bar entry and widget. The widget is placed `belowEditor`. Other extensions using the same slot would conflict; pick a different slot name in those extensions.
 
 ## Troubleshooting
 
 ### Extension not loading
 
-```bash
+```
 /reload
 ```
 
-Check console for errors:
-```
-[pi-dual-agent] loaded - /dual setup|start|pause|resume|stop|status
-```
+Check console for errors. The extension logs `[pi-dual-agent] loaded` on success.
 
-### No models available
+### "No <role> model configured"
 
-1. Run `/login` to configure a provider
-2. Run `/dual setup` again
+Run `/dual setup` to pick models for both roles.
 
-### Session stuck
+### "Model not found: <provider>/<id>"
 
-```bash
-/dual stop     # Stop current session
-/reload        # Reload extension
-/dual setup    # Reset if needed
-```
+The model from your config isn't currently available. Either log in to the provider (`/login`) or re-pick the model (`/dual setup`).
+
+### Sub-session seems stuck
+
+`/dual stop` cancels the active sub-session. The router doesn't currently support partial cancellation mid-tool-call (the sub-session finishes its current event), but the cost and the result are still accounted for.
+
+### Cost totals look wrong
+
+The router only accumulates cost from sub-sessions it ran. The slash skills' own /commit-style operations and the user's main session are not counted. This is by design - dual-agent tracks its own spend, not the global pi spend.
 
 ## Development
 
-This repo is the source of truth. The live install at
-`%USERPROFILE%\.pi\agent\extensions\pi-dual-agent` is a separate
-clone that you sync from this one — **do not edit files in the
-install directly**, since uncommitted changes there can be
-silently destroyed. See [WORKFLOW.md](./WORKFLOW.md) for the
-full loop. The short version:
+This repo is the source of truth. The live install at `%USERPROFILE%\.pi\agent\extensions\pi-dual-agent` is a separate clone that you sync from this one - **do not edit files in the install directly**, since uncommitted changes there can be silently destroyed. See [WORKFLOW.md](./WORKFLOW.md) for the full loop. The short version:
 
 ```bash
 # 1. Edit, test, commit in this dev repo
 cd C:\Development\pi-dual-agent
 # ... make changes ...
-node test/tool-guard.test.mjs   # quick sanity check
+npm run typecheck              # tsc --noEmit
+npm test                       # router-parser + router-preamble tests
 git add -A && git commit -m "..."
 
 # 2. Push, then sync to the live install
@@ -414,17 +299,17 @@ scripts\sync-to-install.bat     # or ./scripts/sync-to-install.sh
 /reload
 ```
 
-The `sync-to-install` script refuses to run if either side has
-uncommitted changes — fail-fast is intentional, so you don't
-accidentally wipe working changes.
+The `sync-to-install` script refuses to run if either side has uncommitted changes - fail-fast is intentional.
 
-## Contributing
+## Tests
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes
-4. Test with `/reload`
-5. Submit a pull request
+```bash
+npm test                        # 23 tests: router-parser (18) + router-preamble (5)
+npm run typecheck               # tsc --noEmit
+```
+
+- `test/router-parser.test.mjs` - the parser that maps `/dual <skill>` to (role, slash, args)
+- `test/router-preamble.test.mjs` - the preamble sent to sub-sessions
 
 ## License
 
@@ -432,5 +317,5 @@ MIT
 
 ## Credits
 
-- Token/cost tracking adapted from [pi-aftc-cache-optimizer](https://github.com/DarceyLloyd/pi-aftc-cache-optimizer)
-- Workflow inspired by [Matt Pocock's skills](https://github.com/mattpockock/skills)
+- Token/cost tracking patterns adapted from [pi-aftc-cache-optimizer](https://github.com/DarceyLloyd/pi-aftc-cache-optimizer)
+- Slash-skill workflow from [Matt Pocock's skills](https://github.com/mattpockock/skills)

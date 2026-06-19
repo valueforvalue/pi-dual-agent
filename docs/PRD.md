@@ -2,210 +2,139 @@
 
 ## Problem Statement
 
-Single-agent workflows have inherent limitations when handling complex, multi-step software engineering tasks. A single model must balance deep reasoning (planning, architecture, edge-case analysis) with efficient execution (tool use, file operations, code implementation). These are competing priorities: reasoning-focused models are slower and more expensive; execution-focused models may miss edge cases or produce suboptimal plans.
+The mattpocock slash-skill pipeline (`/grill-with-docs` -> `/to-prd` -> `/to-issues` -> `/implement` per issue) is well-designed, but it treats every step the same: the same model runs the interview, the same model drafts the PRD, the same model writes the code. That's wasteful - reasoning work and execution work have different cost/quality trade-offs, and the user pays for the reasoning model on every code write.
 
-The user needs a system that separates thinking from doing, allowing specialized models for each role, with human oversight at key checkpoints.
+The user wants to keep the slash-skill pipeline but split it across two models: an expensive reasoning model for the spec work, a cheap execution model for the implementation work. The pipeline itself should not change.
 
 ## Solution
 
-A dual-agent system for pi consisting of:
+A **model router** extension for pi that:
 
-1. **Thinker Agent** - Reasoning-focused model that analyzes, plans, decomposes tasks, and reviews results
-2. **Doer Agent** - Execution-focused model that implements plans, runs tools, and produces artifacts
-3. **Human Checkpoint** - Human reviews Thinker's output before Doer executes
-4. **File Relay** - Markdown-based inbox for agent-to-agent communication
+1. Holds a configured Thinker model and a configured Doer model.
+2. Intercepts `/dual <skill>` invocations and routes them to the right model:
+   - Reasoning skills (`/grill-with-docs`, `/to-prd`, `/to-issues`, `/triage`, `/handoff`) -> Thinker model.
+   - Execution skills (`/implement`, `/prototype`) -> Doer model.
+3. Creates a fresh ephemeral sub-session for each invocation, runs the slash skill on the right model, accumulates cost against the right bucket, prints the result to the main chat.
+4. Provides TUI feedback during the run: status bar, widget, throttled progress stream.
 
-The system runs in iterative loops until the task is complete, the human stops it, or failures exceed a threshold.
+The slash skills own the pipeline. The router owns the model assignment. The user sees the same slash skill behavior they would have without the extension - just with a different model doing the work.
 
 ## User Stories
 
-1. As a developer, I want a Thinker to analyze complex tasks and produce detailed plans, so I can review and refine them before execution begins
-2. As a developer, I want the system to auto-detect project complexity, so complex projects get thorough planning and simple tasks get quick execution
-3. As a developer, I want to pick specialized models for Thinker and Doer from my available logins, so I can optimize for cost and capability
-4. As a developer, I want to edit Thinker's plans directly, so my annotations and modifications flow into execution
-5. As a developer, I want to see real-time status and cost tracking, so I know what's happening and how much it's costing
-6. As a developer, I want to pause, resume, or stop the loop at any time, so I maintain full control
-7. As a developer, I want the system to recover gracefully from errors, so failures don't derail the entire session
-8. As a developer, I want session state and artifacts to persist, so I can resume interrupted work
+1. As a developer, I want my reasoning model to handle `/grill-with-docs` and my execution model to handle `/implement`, so I save money on the bulk of work without losing the reasoning quality.
+2. As a developer, I want to see per-model costs after a run, so I can tune my model pair over time.
+3. As a developer, I want a visible status bar / widget / progress stream while a sub-session runs, so I know it's not stuck.
+4. As a developer, I want to be able to override the routing on a per-call basis, so I can run `/implement` on the Thinker for a hard debugging session.
+5. As a developer, I want my model choice to persist across pi sessions, so I don't re-pick on every project.
 
 ## Implementation Decisions
 
-### Architecture
+### Routing
 
-- **Thinker Session**: Persistent across iterations, maintains conversation context
-- **Doer Session**: Created fresh per iteration, ephemeral
-- **Communication**: File relay via project-local inbox
-- **Inbox Location**: `./project/.pi/inbox/`
+Skill-to-model routing is hardcoded in `lib/router-parser.ts` with sensible defaults. Per-skill configurability (a routing table in the config) is deferred - users who want to override on a per-call basis use the explicit verb forms `/dual think <prompt>` and `/dual code <prompt>`.
 
-### Agent Roles
+Default routing:
 
-| Agent | Focus | Model Traits |
-|-------|-------|--------------|
-| Thinker | Reasoning, planning, analysis, review | High capability, reasoning-enabled, slower |
-| Doer | Execution, tool use, implementation | Fast, reliable tool use, cost-effective |
+| Short name | Slash command | Class |
+|---|---|---|
+| grill | `/grill-with-docs` | thinker |
+| me | `/grill-me` | thinker |
+| prd | `/to-prd` | thinker |
+| issues | `/to-issues` | thinker |
+| triage | `/triage` | thinker |
+| arch | `/improve-codebase-architecture` | thinker |
+| handoff | `/handoff` | thinker |
+| implement | `/implement` | doer |
+| prototype | `/prototype` | doer |
 
-### Iterative Loop
+The full slash command name also works as input (e.g. `/dual grill-with-docs <args>` and `/dual /grill-with-docs <args>`).
+
+### Sub-session lifecycle
+
+Each `/dual <skill> [args]` invocation creates one ephemeral sub-session:
+
+1. Look up the model for the role (Thinker or Doer) from the persisted config.
+2. Create a new `AgentSession` with that model, the project cwd, and the role-appropriate tool set.
+3. Send the router preamble + the slash command + the args as the session's input.
+4. Subscribe to the session's events for TUI feedback.
+5. Wait for `agent_end` (or for the model to go idle).
+6. Read the slash skill's final assistant message and print it to the main chat as a normal assistant message.
+7. Dispose the session, accumulate cost against the role bucket.
+
+There is no persistent session, no loop, no checkpoint, no file relay. Each invocation is one round trip.
+
+### Router preamble
+
+Sent to the sub-session as part of the prompt:
 
 ```
-User Request -> Thinker (Plan) -> Human (Review) -> Doer (Execute) -> Thinker (Review) -> (repeat)
+[Router context]
+You are running in a dual-agent sub-session.
+Model class: <thinker|doer>
+Model: <provider/id>
+Cost is being tracked against the <role> bucket.
+
+The user invoked: <slash>
+Run the slash command with the args provided below. Treat this as if
+the user had typed the slash command directly into a fresh session.
+
+---
+
+<args>
 ```
 
-Loop terminates when:
-- Human says "stop"
-- Thinker declares "done"
-- 3 consecutive failures
+The preamble is the only prompt this extension produces. The slash skills own the rest.
 
-### Modes
+### TUI feedback
 
-**Simple Mode (Next-Step Focus):**
-- Thinker identifies only the immediate next action
-- Explains reasoning and expected outcome
-- Waits for human approval
-- Use for: quick fixes, small changes, single-file edits
+- **Status bar**: `⏵ Dual: <role> active — <provider/id> · <slash> (<elapsed>)`. Clears when the sub-session ends.
+- **Widget** (below editor): live state - model, role, skill, turns, tokens, cost, current action. Clears when idle.
+- **Main chat progress**: throttled caveman-style messages, prefixed `[dual:<role>]`. Throttled to ~10 messages per sub-session run.
+- **Result**: the slash skill's final assistant message is printed to the main chat as a normal message.
 
-**Complex Mode (Slash-Skill Pipeline):**
-- Thinker drives the mattpocock slash skills: /grill-with-docs -> /to-prd -> /to-issues
-- PRDs and issues publish to the configured issue tracker (GitHub/GitLab/local)
-- Breaks into tracer-bullet vertical slices
-- Reviews Doer results, refines as needed
-- Use for: new features, system refactors, architecture changes
+### Tool sets per role
 
-**Mode Detection:**
-- Default: simple mode
-- User override: --complex or --simple flag on /dual start
-- Future: tracker-based auto-detect (ready-for-agent issues -> complex)
+- **Thinker sub-session**: `["read", "write", "grep", "find", "ls"]` - no bash, no edit. The Thinker reasons and the slash skill may write artifacts (e.g. `/to-prd` publishing to the tracker, `/create-handoff` writing to OS temp).
+- **Doer sub-session**: `["read", "bash", "edit", "write", "grep", "find", "ls"]` - the full set. The Doer executes code, runs tests, commits.
 
-### Commands
+The slash skills are trusted to write their own artifacts. The previous tool guard (which blocked code writes by the Thinker) is gone - the slash skills' own behavior is the gate.
 
-**Setup:**
-- `/dual setup` - Interactively pick Thinker & Doer models
-- `/dual models` - Show current model assignments
-- `/dual thinker <id>` - Override Thinker model
-- `/dual doer <id>` - Override Doer model
+### Cost tracking
 
-**Control:**
-- `/dual start <task>` - Start with current settings
-- `/dual start <task> --complex` - Force complex mode
-- `/dual start <task> --simple` - Force simple mode
-- `/dual pause` - Pause at checkpoint
-- `/dual resume` - Resume after human input
-- `/dual skip` - Skip current step
-- `/dual restart` - Restart current phase
-- `/dual stop` - Stop everything
-- `/dual status` - Full state: phase, models, iteration, costs
-
-### Inbox Files
-
-**plan.md (Thinker -> Human -> Doer):**
-```md
-# Plan: <Task Name>
-
-## Context
-<User request and Thinker analysis>
-
-## Steps
-1. [ ] <Step description>
-2. [ ] <Step description>
-
-## Dependencies
-- Step 2 depends on Step 1
-
-## Notes
-<!-- Human annotations here -->
-```
-
-**results.md (Doer -> Thinker):**
-```md
-# Results: <Step>
-
-## Status: Complete | Partial | Failed
-
-## Changes Made
-- <Files changed>
-- <Actions taken>
-
-## Diffs
-\`\`\`diff
-<git-style diff>
-\`\`\`
-
-## Blockers
-<Issues encountered>
-
-## Next
-<What Thinker should do>
-```
-
-**checkpoint.md (Human Review):**
-```md
-# Checkpoint Review
-
-## Thinker's Plan
-<Full plan.md>
-
-## Human Annotations
-<!-- User edits here -->
-
-## Decision
-[ ] Approve - Execute as planned
-[ ] Modify - Edits above reflect changes
-[ ] Stop - End the loop
-```
-
-### Token & Cost Tracking
-
-Adapted from pi-aftc-cache-optimizer patterns:
-- Accumulate usage per agent session
-- Track: input tokens, output tokens, cache read/write, total cost
-- Calculate: per-turn rates, aggregate rates, cost estimates
-
-**Display:**
-- Status bar: Thinker/Doer state + costs
-- Widget: Full iteration state
-- Notifications: Key events with cost deltas
-- Pre-execution estimates
+`ModelRegistryWrapper.recordRunCost(role, run)` accumulates the sub-session's `usage` into the appropriate bucket. `/dual status` shows the per-model totals and the grand total. Costs are in-memory; they reset when pi restarts.
 
 ### Persistence
 
-- Model config: `~/.pi/agent/config/pi-dual-agent.json`
-- Sessions: `~/.pi/agent/sessions/pi-dual-agent/`
-- Cost history: `~/.pi/agent/stats/pi-dual-agent/`
+- **Config** (`~/.pi/agent/config/pi-dual-agent.json`): model selection, trace settings. Schema v2.
+- **Per-model cost**: in-memory only.
+- **Slash-skill artifacts**: on the configured issue tracker (not in this extension).
 
-### Error Handling
+The config schema was bumped from v1 to v2. The v1 fields (`defaultMode`, `maxIterations`) are no longer read or written - they were for the old orchestrator loop, which is gone.
 
-**Doer Errors:**
-- Parse error -> Report to Thinker, revised approach
-- Tool blocked -> Retry once, then escalate
-- 3 retries failed -> Mark failed, move to next or stop
+### Error handling
 
-**Thinker Errors:**
-- Unclear request -> Ask human for clarification
-- Loop detection -> Notify human, suggest manual intervention
-
-**Session Errors:**
-- Invalid API key -> Notify human, pause
-- Network error -> Retry with backoff, then pause
+- **No model configured**: error notification, prompts the user to run `/dual setup`.
+- **Model not found** (e.g. provider not logged in): error notification.
+- **Sub-session error**: error notification, clears the active sub-session, accumulates whatever cost was incurred.
+- **Unknown skill name**: error notification listing the available skills.
 
 ## Testing Decisions
 
-- Unit test session creation/destruction
-- Integration test file relay
-- E2E test full loop with mock models
-- Cost tracking accuracy tests
+- **Unit tests** for the parser (`lib/router-parser.ts`): 18 tests covering short names, full slash command names, explicit verb forms, model-setter collision avoidance, unknown-skill errors, multiline args.
+- **Unit tests** for the preamble (`lib/prompts.ts`): 5 tests pinning the structure so accidental edits to wording don't break the user experience.
+- **Typecheck**: `tsc --noEmit` against the full source set.
+- **E2E test**: removed. The previous e2e test was a real-LLM call that cost money and tested the now-deleted tool guard. The slash skills' own e2e tests cover their behavior; this extension's correctness is at the parser + TUI level.
 
 ## Out of Scope
 
-- Multi-user/shared sessions
-- Real-time collaboration
-- Cloud execution
-- Custom model fine-tuning
-- Integration with external CI/CD
+- Per-skill routing configurability (the routing table is hardcoded).
+- A persistent Thinker session across multiple `/dual` invocations.
+- A loop that chains multiple slash skills (the slash skills' own dispatch handles this).
+- The in-repo file relay (`.pi/inbox/plan.md` + `results.md`). The slash skills produce their own artifacts.
+- Cost history persistence (costs reset on pi restart).
 
 ## Further Notes
 
-- Separate npm package: pi-dual-agent
-- Coexists with mode-controller
-- Thinker session can be reset independently
-- Doer session always ephemeral per iteration
-- Inbox files human-editable at checkpoints
-- Cost tracking from cache-optimizer patterns
+- Coexists with `pi-mode-controller` and other pi extensions. Uses the named slot `pi-dual-agent` for its status bar and widget.
+- The router preamble is the only thing the router writes. The slash skills handle the rest.
+- Per-skill routing configurability is a deliberate follow-up, not an oversight. Hardcoded defaults cover the cost-saving use case the user described.
