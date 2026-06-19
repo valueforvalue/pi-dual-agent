@@ -273,7 +273,7 @@ export function getDoerSystemPrompt(mode: DualMode): string {
 
 export function formatThinkerTask(task: string, mode: DualMode): string {
   const modeContext = mode === "complex"
-    ? "Using COMPLEX mode: Follow the to-prd -> to-issues -> TASKS.csv workflow."
+    ? "Using COMPLEX mode: Drive the slash-skill pipeline (grill -> to-prd -> to-issues)."
     : "Using SIMPLE mode: Identify only the next step.";
 
   const system = mode === "complex" ? THINKER_COMPLEX_SYSTEM : THINKER_SIMPLE_SYSTEM;
@@ -286,7 +286,10 @@ ${task}
 
 ${system}
 
-REMINDER: Your first action should be to use the write tool to save your plan to .pi/inbox/plan.md. The Doer cannot proceed without it.`;
+REMINDER: If using the in-repo file relay, your first action is to
+use the write tool to save your plan to .pi/inbox/plan.md. The Doer
+cannot proceed without it. If the user is on the issue-tracker path,
+use the slash skills (/grill-with-docs, /to-prd, /to-issues) instead.`;
 }
 
 export function formatDoerTask(plan: string): string {
@@ -295,6 +298,7 @@ export function formatDoerTask(plan: string): string {
 CURRENT PLAN:
 ${plan}
 
-Execute the current step and report results to .pi/inbox/results.md
+If /implement is available, run /implement on this plan. Otherwise,
+execute the current step and report results to .pi/inbox/results.md.
 `;
 }
