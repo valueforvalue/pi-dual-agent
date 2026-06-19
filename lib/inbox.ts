@@ -10,7 +10,6 @@ import { resolve, join } from "node:path";
 import type { Plan, PlanStep, Results, Checkpoint } from "./types";
 
 const INBOX_DIR = ".pi/inbox";
-const ARTIFACTS_DIR = ".pi";
 
 // File names
 export const FILES = {
@@ -18,11 +17,6 @@ export const FILES = {
   RESULTS: "results.md",
   DIFF: "diff.md",
   CHECKPOINT: "checkpoint.md",
-  ARTIFACTS: {
-    RESEARCH: "RESEARCH.md",
-    PRD: "PRD.md",
-    TASKS: "TASKS.csv",
-  },
 } as const;
 
 export class InboxManager {
@@ -34,10 +28,6 @@ export class InboxManager {
 
   private inboxPath(): string {
     return resolve(this.basePath, INBOX_DIR);
-  }
-
-  private artifactsPath(): string {
-    return resolve(this.basePath, ARTIFACTS_DIR);
   }
 
   async ensureExists(): Promise<void> {
@@ -307,22 +297,11 @@ ${checkpoint.humanAnnotations || "<!-- Your edits here -->"}
   // ========================================
 
   async hasArtifacts(): Promise<{ research: boolean; prd: boolean; tasks: boolean }> {
-    // Helper: returns true on success, false on any read error.
-    // (Any error is treated as "missing" - this is a probe, not a validation.)
-    const exists = async (name: string): Promise<boolean> => {
-      try {
-        await readFile(join(this.artifactsPath(), name), "utf-8");
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    const [research, prd, tasks] = await Promise.all([
-      exists(FILES.ARTIFACTS.RESEARCH),
-      exists(FILES.ARTIFACTS.PRD),
-      exists(FILES.ARTIFACTS.TASKS),
-    ]);
-    return { research, prd, tasks };
+    // Stubbed: docs/ artifact detection no longer drives complex-mode
+    // auto-detection. Pending tracker-based replacement. Always returns
+    // no artifacts so the caller defaults to simple mode unless the
+    // user passed --complex explicitly.
+    return { research: false, prd: false, tasks: false };
   }
 
   async clearInbox(): Promise<void> {
